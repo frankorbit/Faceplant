@@ -1,0 +1,8 @@
+xcuserdata/
+DerivedData/
+build/
+*.xcworkspace/xcshareddata/swiftpm/
+.DS_Store
+Faceplant.xcodeproj/
+# 原版视频截图含真人面部，只保留本地
+docs/reference/

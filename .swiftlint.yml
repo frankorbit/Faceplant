@@ -1,0 +1,28 @@
+excluded:
+  - Faceplant.xcodeproj
+  - build
+  - DerivedData
+opt_in_rules:
+  - closure_spacing
+  - empty_count
+  - explicit_init
+  - first_where
+  - force_unwrapping
+  - implicit_return
+  - modifier_order
+  - sorted_imports
+  - unneeded_parentheses_in_closure_argument
+  - vertical_whitespace_closing_braces
+identifier_name:
+  min_length: 2
+  excluded: [x, y, z, u, v, id]
+line_length:
+  warning: 140
+  error: 180
+type_body_length:
+  warning: 300
+file_length:
+  warning: 500
+# 与 SwiftFormat 的多行集合尾逗号约定保持一致
+trailing_comma:
+  mandatory_comma: true

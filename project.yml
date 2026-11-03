@@ -1,0 +1,45 @@
+name: Faceplant
+options:
+  bundleIdPrefix: com.frank
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
+targets:
+  Faceplant:
+    type: application
+    platform: iOS
+    sources:
+      - path: Faceplant
+    info:
+      path: Faceplant/Info.plist
+      properties:
+        CFBundleDisplayName: Faceplant
+        NSCameraUsageDescription: Faceplant 需要前置摄像头录制你的脸，并用后置摄像头把它放到墙上。
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arkit
+          - front-facing-camera
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.frank.faceplant
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: Faceplant/Faceplant-Bridging-Header.h
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+schemes:
+  Faceplant:
+    build:
+      targets:
+        Faceplant: all
+    run:
+      config: Debug
