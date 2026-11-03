@@ -13,6 +13,11 @@ enum FaceplantError: Error, CustomStringConvertible {
     case textureCreationFailed(label: String)
     case faceTrackingUnsupported
     case frontCameraUnavailable
+    case recordingSetupFailed(String)
+    case meshStreamCorrupted(String)
+    case recordingPackageInvalid(String)
+    case thumbnailFailed
+    case playbackSetupFailed(String)
 
     var description: String {
         switch self {
@@ -26,6 +31,11 @@ enum FaceplantError: Error, CustomStringConvertible {
         case let .textureCreationFailed(label): "创建 MTLTexture 失败: \(label)"
         case .faceTrackingUnsupported: "设备不支持人脸追踪"
         case .frontCameraUnavailable: "找不到前置摄像头"
+        case let .recordingSetupFailed(reason): "录制初始化失败: \(reason)"
+        case let .meshStreamCorrupted(reason): "顶点流损坏: \(reason)"
+        case let .recordingPackageInvalid(reason): "录制包无效: \(reason)"
+        case .thumbnailFailed: "生成缩略图失败"
+        case let .playbackSetupFailed(reason): "回放初始化失败: \(reason)"
         }
     }
 }

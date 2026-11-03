@@ -1,0 +1,301 @@
+import ARKit
+import Metal
+import os
+import SceneKit
+import UIKit
+
+/// 录制页：前置摄像头人脸追踪，实时显示烘焙贴图，按钮开始/停止录制。
+///
+/// 职责划分：
+/// - 生命周期与 UI：本类
+/// - 会话：ARSessionController（独立 delegate 队列）
+/// - 每帧烘焙与录制：`handle(frame:)`，在 delegate 队列执行
+/// - 显示：ARSCNView + ARSCNFaceGeometry
+final class RecordViewController: UIViewController {
+    var onFinish: ((FaceRecording) -> Void)?
+
+    private static let logger = Logger(subsystem: "com.frank.faceplant", category: "record")
+    private static let textureSize = 1024
+
+    private let sceneView = ARSCNView()
+    private let sessionController = ARSessionController()
+    private let recordButton = UIButton(type: .custom)
+    private let timerLabel = UILabel()
+    private let statusLabel = UILabel()
+
+    private var device: MTLDevice?
+    private var textureCache: PixelBufferTextureCache?
+    private var faceGeometry: ARSCNFaceGeometry?
+    private let viewportSize = OSAllocatedUnfairLock(initialState: CGSize.zero)
+
+    // 以下只在 delegate 队列访问
+    private var latestAnchor: ARFaceAnchor?
+    private var baker: FaceTextureBaker?
+    private var liveSource: LiveFaceMeshSource?
+    private var recorder: FaceRecorder?
+
+    /// 主线程
+    private var isRecording = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        setupSceneView()
+        setupControls()
+        bindSession()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = sceneView.bounds.size
+        viewportSize.withLock { $0 = size }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        do {
+            try sessionController.runFaceTracking()
+            show(status: "对准前置摄像头")
+        } catch {
+            show(status: "\(error)")
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        sessionController.delegateQueue.async { [weak self] in
+            self?.recorder?.discard()
+            self?.recorder = nil
+        }
+        sessionController.pause()
+    }
+
+    // MARK: - Setup
+
+    private func setupSceneView() {
+        sceneView.translatesAutoresizingMaskIntoConstraints = false
+        sceneView.automaticallyUpdatesLighting = false
+        sceneView.rendersCameraGrain = false
+        sceneView.session = sessionController.session
+        sceneView.delegate = self
+        view.addSubview(sceneView)
+        NSLayoutConstraint.activate([
+            sceneView.topAnchor.constraint(equalTo: view.topAnchor),
+            sceneView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            sceneView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            sceneView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
+
+        guard let device = sceneView.device else {
+            show(status: FaceplantError.metalUnavailable.description)
+            return
+        }
+        self.device = device
+        do {
+            textureCache = try PixelBufferTextureCache(device: device)
+        } catch {
+            show(status: "\(error)")
+        }
+    }
+
+    private func setupControls() {
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.numberOfLines = 0
+        statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        statusLabel.textColor = .white
+        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        view.addSubview(statusLabel)
+
+        timerLabel.translatesAutoresizingMaskIntoConstraints = false
+        timerLabel.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
+        timerLabel.textColor = .white
+        timerLabel.text = "00.0"
+        view.addSubview(timerLabel)
+
+        recordButton.translatesAutoresizingMaskIntoConstraints = false
+        recordButton.backgroundColor = .systemRed
+        recordButton.layer.cornerRadius = 36
+        recordButton.layer.borderWidth = 4
+        recordButton.layer.borderColor = UIColor.white.cgColor
+        recordButton.accessibilityLabel = "开始录制"
+        recordButton.addTarget(self, action: #selector(toggleRecording), for: .touchUpInside)
+        view.addSubview(recordButton)
+
+        NSLayoutConstraint.activate([
+            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            recordButton.widthAnchor.constraint(equalToConstant: 72),
+            recordButton.heightAnchor.constraint(equalToConstant: 72),
+            recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            recordButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            timerLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            timerLabel.bottomAnchor.constraint(equalTo: recordButton.topAnchor, constant: -12),
+        ])
+    }
+
+    private func bindSession() {
+        sessionController.onFaceAnchor = { [weak self] anchor in
+            self?.latestAnchor = anchor
+            self?.prepareBakerIfNeeded(anchor: anchor)
+        }
+        sessionController.onFrame = { [weak self] frame in
+            self?.handle(frame: frame)
+        }
+        sessionController.onFailure = { [weak self] error in
+            self?.show(status: "session failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Per-frame (delegate queue)
+
+    private func prepareBakerIfNeeded(anchor: ARFaceAnchor) {
+        guard baker == nil, let device else { return }
+        let topology = FaceMeshTopology(geometry: anchor.geometry)
+        do {
+            baker = try FaceTextureBaker(device: device, topology: topology, textureSize: Self.textureSize)
+            liveSource = LiveFaceMeshSource(topology: topology)
+        } catch {
+            show(status: "baker init failed: \(error)")
+        }
+    }
+
+    private func handle(frame: ARFrame) {
+        guard let anchor = latestAnchor, anchor.isTracked,
+              let baker, let textureCache, let liveSource else { return }
+        let viewport = viewportSize.withLock { $0 }
+        guard viewport.width > 0, viewport.height > 0 else { return }
+
+        let meshFrame = FaceMeshFrame(anchor: anchor, timestamp: frame.timestamp)
+        do {
+            let planes = try textureCache.cameraPlanes(for: frame.capturedImage)
+            let uniforms = ProjectionMath.bakeUniforms(
+                frame: frame, anchorTransform: anchor.transform, orientation: .portrait, viewportSize: viewport
+            )
+            let recorder = recorder
+            var captureError: Error?
+            let texture = baker.bake(vertices: meshFrame.vertices, uniforms: uniforms, camera: planes) { commandBuffer, baked in
+                guard let recorder else { return }
+                do {
+                    try recorder.capture(frame: meshFrame, baked: baked, commandBuffer: commandBuffer)
+                } catch {
+                    captureError = error
+                }
+            }
+            textureCache.flush()
+            liveSource.update(frame: meshFrame, texture: texture)
+
+            let elapsed = recorder?.elapsed
+            DispatchQueue.main.async { [weak self] in
+                self?.faceGeometry?.firstMaterial?.diffuse.contents = texture
+                if let elapsed {
+                    self?.timerLabel.text = String(format: "%04.1f", elapsed)
+                }
+            }
+            if let captureError {
+                throw captureError
+            }
+            if let recorder, recorder.elapsed >= FaceRecorder.maxDuration {
+                stopRecording()
+            }
+        } catch {
+            Self.logger.error("帧处理失败: \(String(describing: error))")
+            show(status: "录制出错: \(error)")
+            recorder?.discard()
+            recorder = nil
+            DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }
+        }
+    }
+
+    // MARK: - Recording control
+
+    @objc private func toggleRecording() {
+        if isRecording {
+            sessionController.delegateQueue.async { [weak self] in self?.stopRecording() }
+        } else {
+            setRecordingUI(true)
+            sessionController.delegateQueue.async { [weak self] in self?.startRecording() }
+        }
+    }
+
+    /// delegate 队列
+    private func startRecording() {
+        guard recorder == nil, let baker, let textureCache else {
+            show(status: "还没检测到人脸，稍等再按")
+            DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }
+            return
+        }
+        do {
+            let store = try FaceRecordingStore()
+            recorder = try FaceRecorder(
+                packageURL: store.makePackageURL(),
+                topology: baker.topology,
+                textureSize: baker.textureSize,
+                textureCache: textureCache
+            )
+            show(status: "录制中，做几个夸张表情")
+        } catch {
+            show(status: "无法开始录制: \(error)")
+            DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }
+        }
+    }
+
+    /// delegate 队列
+    private func stopRecording() {
+        guard let recorder else { return }
+        self.recorder = nil
+        show(status: "正在保存…")
+        recorder.finish { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setRecordingUI(false)
+                switch result {
+                case let .success(recording):
+                    self.show(status: "已保存")
+                    self.onFinish?(recording)
+                case let .failure(error):
+                    self.show(status: "保存失败: \(error)")
+                }
+            }
+        }
+    }
+
+    // MARK: - UI helpers (main)
+
+    private func setRecordingUI(_ recording: Bool) {
+        isRecording = recording
+        recordButton.backgroundColor = recording ? .white : .systemRed
+        recordButton.layer.borderColor = recording ? UIColor.systemRed.cgColor : UIColor.white.cgColor
+        recordButton.accessibilityLabel = recording ? "停止录制" : "开始录制"
+        if !recording {
+            timerLabel.text = "00.0"
+        }
+    }
+
+    private func show(status: String) {
+        if Thread.isMainThread {
+            statusLabel.text = status
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.statusLabel.text = status }
+        }
+    }
+}
+
+// MARK: - ARSCNViewDelegate
+
+extension RecordViewController: ARSCNViewDelegate {
+    func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+        guard anchor is ARFaceAnchor, let device, let geometry = ARSCNFaceGeometry(device: device) else { return nil }
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = UIColor.lightGray
+        geometry.materials = [material]
+        faceGeometry = geometry
+        return SCNNode(geometry: geometry)
+    }
+
+    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        guard let faceAnchor = anchor as? ARFaceAnchor else { return }
+        faceGeometry?.update(from: faceAnchor.geometry)
+    }
+}

@@ -26,8 +26,6 @@ typedef enum : int {
 typedef struct {
     matrix_float4x4 projectionViewModel;
     matrix_float3x3 displayTransformInverse;
-    /// 1 表示 canonical UV 的 v=0 落在纹理底部，0 表示落在顶部。M0 用它验证 ARKit 的 UV 方向约定。
-    int flipV;
 } BakeUniforms;
 
 #endif /* ShaderTypes_h */

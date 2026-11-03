@@ -8,11 +8,11 @@ import simd
 /// 线程约束：在单一队列调用（ARSession delegate 队列），内部不加锁。
 final class FaceTextureBaker {
     let textureSize: Int
+    let topology: FaceMeshTopology
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
-    private let topology: FaceMeshTopology
     private let uvBuffer: MTLBuffer
     private let indexBuffer: MTLBuffer
 
@@ -75,8 +75,16 @@ final class FaceTextureBaker {
         }
     }
 
-    /// 提交一次烘焙。返回本次写入的输出纹理；GPU 完成前内容未定，但 SceneKit 读取时会自动排在后面。
-    func bake(vertices: [SIMD3<Float>], uniforms: BakeUniforms, camera: CameraTextureCache.Planes) -> MTLTexture {
+    /// 提交一次烘焙。返回本次写入的输出纹理；GPU 完成前内容未定，但同一 device 上后续读取会自动排在后面。
+    ///
+    /// - Parameter beforeCommit: 渲染编码完成、命令缓冲提交之前的钩子。录制器用它把结果 blit 进视频像素缓冲，
+    ///   这样显示与录制共用一次烘焙，不需要第二个 pass。
+    func bake(
+        vertices: [SIMD3<Float>],
+        uniforms: BakeUniforms,
+        camera: PixelBufferTextureCache.CameraPlanes,
+        beforeCommit: ((MTLCommandBuffer, MTLTexture) -> Void)? = nil
+    ) -> MTLTexture {
         inflight.wait()
 
         let slot = frameIndex % Self.inflightCount
@@ -113,8 +121,8 @@ final class FaceTextureBaker {
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: Int(BakeBufferIndexVertices.rawValue))
         encoder.setVertexBuffer(uvBuffer, offset: 0, index: Int(BakeBufferIndexUVs.rawValue))
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<BakeUniforms>.stride, index: Int(BakeBufferIndexUniforms.rawValue))
-        encoder.setFragmentTexture(camera.luma, index: Int(BakeTextureIndexLuma.rawValue))
-        encoder.setFragmentTexture(camera.chroma, index: Int(BakeTextureIndexChroma.rawValue))
+        encoder.setFragmentTexture(camera.luma.texture, index: Int(BakeTextureIndexLuma.rawValue))
+        encoder.setFragmentTexture(camera.chroma.texture, index: Int(BakeTextureIndexChroma.rawValue))
         encoder.drawIndexedPrimitives(
             type: .triangle,
             indexCount: topology.indexCount,
@@ -123,6 +131,8 @@ final class FaceTextureBaker {
             indexBufferOffset: 0
         )
         encoder.endEncoding()
+
+        beforeCommit?(commandBuffer, output)
 
         // 闭包持有 camera，保证 IOSurface 在 GPU 读取完成前不被回收
         commandBuffer.addCompletedHandler { [inflight] _ in

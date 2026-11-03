@@ -4,22 +4,19 @@ import UIKit
 
 /// Spike A：验证"相机画面投影到 canonical UV"的数学是否正确。
 ///
-/// 验收标准：
-/// 1. 主画面里贴着烘焙贴图的人脸网格，眼睛、鼻子、嘴与真人对齐，没有镜像或错位。
-/// 2. 右下角的展开贴图是一张正立的脸。若倒置，用 Flip V 按钮切换并记录结论。
+/// M0 已在 iPhone 16 上验收通过（2026-11-04），保留作为投影数学的回归参考：
+/// 主画面人脸贴图五官对齐无镜像，右下角展开贴图为正立的脸。
 final class ProjectionSpikeViewController: UIViewController {
     private let sceneView = ARSCNView()
     private let previewView = SCNView()
     private let statusLabel = UILabel()
-    private let flipButton = UIButton(type: .system)
 
     private var device: MTLDevice?
-    private var textureCache: CameraTextureCache?
+    private var textureCache: PixelBufferTextureCache?
     private var baker: FaceTextureBaker?
     private var faceGeometry: ARSCNFaceGeometry?
     private var previewMaterial: SCNMaterial?
     private var latestFaceAnchor: ARFaceAnchor?
-    private var flipV = false
     private var bakedFrameCount = 0
 
     override func viewDidLoad() {
@@ -68,7 +65,7 @@ final class ProjectionSpikeViewController: UIViewController {
         }
         self.device = device
         do {
-            textureCache = try CameraTextureCache(device: device)
+            textureCache = try PixelBufferTextureCache(device: device)
         } catch {
             show(status: "\(error)")
         }
@@ -115,29 +112,11 @@ final class ProjectionSpikeViewController: UIViewController {
         statusLabel.textColor = .white
         statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
         view.addSubview(statusLabel)
-
-        flipButton.translatesAutoresizingMaskIntoConstraints = false
-        flipButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        flipButton.tintColor = .white
-        var configuration = UIButton.Configuration.plain()
-        configuration.title = "Flip V: off"
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12)
-        flipButton.configuration = configuration
-        flipButton.addTarget(self, action: #selector(toggleFlip), for: .touchUpInside)
-        view.addSubview(flipButton)
-
         NSLayoutConstraint.activate([
             statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            flipButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            flipButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
-    }
-
-    @objc private func toggleFlip() {
-        flipV.toggle()
-        flipButton.configuration?.title = "Flip V: \(flipV ? "on" : "off")"
     }
 
     private func show(status: String) {
@@ -155,13 +134,12 @@ final class ProjectionSpikeViewController: UIViewController {
         guard viewportSize.width > 0, viewportSize.height > 0 else { return }
 
         do {
-            let planes = try textureCache.planes(for: frame.capturedImage)
+            let planes = try textureCache.cameraPlanes(for: frame.capturedImage)
             let uniforms = ProjectionMath.bakeUniforms(
                 frame: frame,
                 anchorTransform: anchor.transform,
                 orientation: .portrait,
-                viewportSize: viewportSize,
-                flipV: flipV
+                viewportSize: viewportSize
             )
             let texture = baker.bake(vertices: Array(anchor.geometry.vertices), uniforms: uniforms, camera: planes)
             textureCache.flush()
@@ -171,7 +149,7 @@ final class ProjectionSpikeViewController: UIViewController {
             bakedFrameCount += 1
             if bakedFrameCount % 15 == 0 {
                 let viewport = "\(Int(viewportSize.width))x\(Int(viewportSize.height))"
-                show(status: "tracked · baked \(bakedFrameCount) · flipV \(flipV)\nviewport \(viewport)")
+                show(status: "tracked · baked \(bakedFrameCount)\nviewport \(viewport)")
             }
         } catch {
             show(status: "bake failed: \(error)")

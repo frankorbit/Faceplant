@@ -18,7 +18,33 @@ just format   # 自动格式化
 
 `Faceplant.xcodeproj` 不入库，clone 后先执行 `just gen` 生成。人脸追踪不能在模拟器上跑，运行必须用真机。打开工程后在 Signing 里选自己的 Team 即可。
 
-## 当前阶段：M0 Spike
+## 当前阶段：M1 录制（代码完成，待真机验收）
+
+流程：首页 → 录制新脸 → 录制页（前置摄像头，实时显示烘焙贴图）→ 按红钮录 5 到 15 秒 → 自动进入 Face Review 回放。
+
+真机验收清单：
+
+| 检查 | 期望 |
+|---|---|
+| 录制页人脸贴图 | 与 Spike A 一致，五官对齐 |
+| 录制 10 秒后 | 自动跳到 Face Review，脸在转台上循环播放，表情与贴图同步，嘴型不脱节 |
+| Review 页信息 | 时长约 10 秒，帧数约 300（30 fps）或 600（60 fps） |
+| 首页"我的脸" | 出现带缩略图的条目，再次进入可回放 |
+| 删除 | 条目消失，`Application Support/Recordings` 下目录被移除 |
+| Xcode 控制台 | 没有 `retaining N ARFrames` 警告，没有"视频帧追加失败" |
+
+录制包位置：`Application Support/Recordings/<uuid>.faceplant`，格式见技术方案 4.4。
+
+## M0 Spike（已完成）
+
+2026-11-04 在 iPhone 16 上验证完毕，结论已写入技术方案 4.3 与 4.7：
+
+| Spike | 结果 |
+|---|---|
+| A · 投影烘焙对齐 | 通过。五官对齐无镜像，`flipV = false`，SceneKit 不需额外翻转 |
+| B · 前后摄同开 | `userFaceTrackingEnabled` 可用；自开前置 `AVCaptureSession` 会抢走摄像头导致 ARKit 会话失败，方案不可行 |
+
+两个页面保留在工程里作为回归参考，M1 落地后删除。下面是当时的验收说明。
 
 App 启动后是一个菜单，两个 spike 各自回答一个问题。
 
@@ -57,9 +83,13 @@ App 启动后是一个菜单，两个 spike 各自回答一个问题。
 
 ```
 Faceplant/
-├── App/            SwiftUI 入口与 M0 菜单
-├── FaceMesh/       canonical 网格拓扑
-├── Rendering/      Metal 烘焙 pass、相机纹理缓存、投影数学、共享 shader 类型
-├── Spikes/         M0 的两个验证页面
-└── Support/        错误类型
+├── App/            SwiftUI 入口
+├── ARSession/      ARSessionController，唯一持有 ARSession，delegate 跑独立队列
+├── FaceMesh/       网格帧、拓扑、blendShape 顺序、FaceMeshSource 协议与实时实现
+├── Recording/      .faceplant 包模型、mesh.bin 读写、FaceRecorder、Store
+├── Playback/       FaceRecordingPlayer（视频时钟 + 顶点插值）、SceneKit 回放视图
+├── Rendering/      Metal 烘焙 pass、像素缓冲纹理缓存、投影数学、共享 shader 类型
+├── UI/             Home、Record、Review 三个页面
+├── Spikes/         M0 的两个验证页面，M2 后删除
+└── Support/        错误类型、二进制读写辅助
 ```

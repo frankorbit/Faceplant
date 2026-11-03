@@ -37,11 +37,10 @@ vertex BakeVertexOut bakeVertex(uint vid [[vertex_id]],
     float2 uvView = ndc * float2(0.5f, -0.5f) + 0.5f;
     float3 uvImage = u.displayTransformInverse * float3(uvView, 1.0f);
 
-    // 把 canonical UV 当作裁剪空间坐标，网格就被"摊平"到渲染目标上
-    float ndcY = (u.flipV != 0) ? (uv.y * 2.0f - 1.0f) : (1.0f - uv.y * 2.0f);
-
+    // 把 canonical UV 当作裁剪空间坐标，网格就被"摊平"到渲染目标上。
+    // M0 已验证：v = 0 落在纹理顶部，和 Metal 的左上角原点一致，不需要翻转。
     BakeVertexOut out;
-    out.position = float4(uv.x * 2.0f - 1.0f, ndcY, 0.0f, 1.0f);
+    out.position = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, 0.0f, 1.0f);
     out.cameraUV = uvImage.xy;
     return out;
 }

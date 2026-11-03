@@ -4,7 +4,7 @@ import SwiftUI
 struct FaceplantApp: App {
     var body: some Scene {
         WindowGroup {
-            SpikeMenuView()
+            HomeScreen()
         }
     }
 }

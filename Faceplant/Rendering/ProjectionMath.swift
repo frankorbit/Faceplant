@@ -10,8 +10,7 @@ enum ProjectionMath {
         frame: ARFrame,
         anchorTransform: simd_float4x4,
         orientation: UIInterfaceOrientation,
-        viewportSize: CGSize,
-        flipV: Bool
+        viewportSize: CGSize
     ) -> BakeUniforms {
         let camera = frame.camera
         let projection = camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
@@ -20,8 +19,7 @@ enum ProjectionMath {
         let display = frame.displayTransform(for: orientation, viewportSize: viewportSize).inverted()
         return BakeUniforms(
             projectionViewModel: projection * view * anchorTransform,
-            displayTransformInverse: float3x3(display),
-            flipV: flipV ? 1 : 0
+            displayTransformInverse: float3x3(display)
         )
     }
 
