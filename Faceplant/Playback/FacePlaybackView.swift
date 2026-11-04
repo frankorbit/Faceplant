@@ -10,9 +10,11 @@ final class FacePlaybackView: UIView {
     private let sceneView = SCNView()
     private let faceNode = SCNNode()
     private let material = SCNMaterial()
+    private let eyeMaterial = EyeballNode.makeMaterial()
+    private lazy var leftEyeNode = EyeballNode.make(material: eyeMaterial)
+    private lazy var rightEyeNode = EyeballNode.make(material: eyeMaterial)
     private var displayLink: CADisplayLink?
-    private var uvSource: SCNGeometrySource?
-    private var element: SCNGeometryElement?
+    private var faceGeometry: SceneKitFaceGeometry?
 
     var source: FaceMeshSource? {
         didSet { rebuildTopology() }
@@ -53,6 +55,11 @@ final class FacePlaybackView: UIView {
         cameraNode.position = SCNVector3(0, 0, 0.35)
         scene.rootNode.addChildNode(cameraNode)
         scene.rootNode.addChildNode(faceNode)
+        if FaceRenderOptions.showsEyeballs {
+            // 眼球挂在脸节点下，EyePose 本来就是 face 局部坐标
+            faceNode.addChildNode(leftEyeNode)
+            faceNode.addChildNode(rightEyeNode)
+        }
         sceneView.scene = scene
 
         material.lightingModel = .constant
@@ -73,46 +80,31 @@ final class FacePlaybackView: UIView {
 
     private func rebuildTopology() {
         guard let topology = source?.topology else {
-            uvSource = nil
-            element = nil
+            faceGeometry = nil
             faceNode.geometry = nil
             return
         }
-        let uvData = topology.textureCoordinates.withUnsafeBufferPointer { Data(buffer: $0) }
-        uvSource = SCNGeometrySource(
-            data: uvData,
-            semantic: .texcoord,
-            vectorCount: topology.vertexCount,
-            usesFloatComponents: true,
-            componentsPerVector: 2,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<SIMD2<Float>>.stride
-        )
-        element = SCNGeometryElement(indices: topology.triangleIndices, primitiveType: .triangles)
+        faceGeometry = SceneKitFaceGeometry(topology: topology)
     }
 
     @objc private func tick(_ link: CADisplayLink) {
         onTick?(link.targetTimestamp)
-        guard let source, let uvSource, let element,
+        guard let source, let faceGeometry,
               let frame = source.currentFrame(at: link.targetTimestamp) else { return }
 
-        let vertexData = frame.vertices.withUnsafeBufferPointer { Data(buffer: $0) }
-        let vertexSource = SCNGeometrySource(
-            data: vertexData,
-            semantic: .vertex,
-            vectorCount: frame.vertices.count,
-            usesFloatComponents: true,
-            componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<SIMD3<Float>>.stride
-        )
-        let geometry = SCNGeometry(sources: [vertexSource, uvSource], elements: [element])
         if let texture = source.faceTexture {
             material.diffuse.contents = texture
         }
-        geometry.materials = [material]
-        faceNode.geometry = geometry
+        if let geometry = faceGeometry.makeGeometry(vertices: frame.vertices, material: material) {
+            faceNode.geometry = geometry
+        }
+
+        guard FaceRenderOptions.showsEyeballs else { return }
+        if let eyes = frame.eyes {
+            leftEyeNode.simdTransform = eyes.left
+            rightEyeNode.simdTransform = eyes.right
+        }
+        leftEyeNode.isHidden = frame.eyes == nil
+        rightEyeNode.isHidden = frame.eyes == nil
     }
 }

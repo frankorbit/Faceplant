@@ -8,8 +8,10 @@ import os
 /// 线程约束：`pollTexture` 与 `currentFrame` 在渲染线程（CADisplayLink）调用；play/pause 在主线程。
 final class FaceRecordingPlayer: FaceMeshSource {
     let recording: FaceRecording
+    /// 加盖后的拓扑，渲染层用这个；文件里的原始拓扑只在加载时用一次
     let topology: FaceMeshTopology
 
+    private let capping: FaceMeshCapping
     private let frames: [FaceMeshFrame]
     private let player: AVPlayer
     private let item: AVPlayerItem
@@ -23,7 +25,8 @@ final class FaceRecordingPlayer: FaceMeshSource {
 
     init(recording: FaceRecording, device: MTLDevice) throws {
         self.recording = recording
-        topology = try recording.loadTopology()
+        capping = try FaceMeshCapping(base: recording.loadTopology())
+        topology = capping.topology
         frames = try recording.loadMeshFrames()
         guard !frames.isEmpty else { throw FaceplantError.playbackSetupFailed("录制包没有顶点帧") }
         textureCache = try PixelBufferTextureCache(device: device)
@@ -72,7 +75,7 @@ final class FaceRecordingPlayer: FaceMeshSource {
 
     /// 取回放时钟对应的顶点帧，相邻两帧线性插值
     func currentFrame(at hostTime: TimeInterval) -> FaceMeshFrame? {
-        frame(atRecordingTime: currentTime)
+        capping.extend(frame(atRecordingTime: currentTime))
     }
 
     var faceTexture: MTLTexture? { latestTexture?.texture }

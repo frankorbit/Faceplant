@@ -10,7 +10,8 @@ import UIKit
 /// - 生命周期与 UI：本类
 /// - 会话：ARSessionController（独立 delegate 队列）
 /// - 每帧烘焙与录制：`handle(frame:)`，在 delegate 队列执行
-/// - 显示：ARSCNView + ARSCNFaceGeometry
+/// - 显示：ARSCNView，脸节点的几何由 `LiveFaceMeshSource` 的最新帧（含加盖）在渲染线程重建，
+///   与 Review 页用同一套 `SceneKitFaceGeometry`，不用 ARSCNFaceGeometry 是因为它带洞
 final class RecordViewController: UIViewController {
     var onFinish: ((FaceRecording) -> Void)?
 
@@ -25,12 +26,26 @@ final class RecordViewController: UIViewController {
 
     private var device: MTLDevice?
     private var textureCache: PixelBufferTextureCache?
-    private var faceGeometry: ARSCNFaceGeometry?
     private let viewportSize = OSAllocatedUnfairLock(initialState: CGSize.zero)
+
+    /// 预览几何与数据源。delegate 队列写一次，SceneKit 渲染线程每帧读。
+    private struct Preview {
+        let geometry: SceneKitFaceGeometry
+        let source: LiveFaceMeshSource
+    }
+
+    private let preview = OSAllocatedUnfairLock<Preview?>(initialState: nil)
+    /// 只在渲染线程与主线程改 diffuse，SceneKit 对材质属性的赋值是线程安全的
+    private let previewMaterial = SCNMaterial()
+    private let eyeMaterial = EyeballNode.makeMaterial()
+    // 以下只在 SceneKit 渲染线程（ARSCNViewDelegate 回调）访问
+    private var leftEyeNode: SCNNode?
+    private var rightEyeNode: SCNNode?
 
     // 以下只在 delegate 队列访问
     private var latestAnchor: ARFaceAnchor?
     private var baker: FaceTextureBaker?
+    private var capping: FaceMeshCapping?
     private var liveSource: LiveFaceMeshSource?
     private var recorder: FaceRecorder?
 
@@ -85,6 +100,9 @@ final class RecordViewController: UIViewController {
             sceneView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             sceneView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+
+        previewMaterial.lightingModel = .constant
+        previewMaterial.diffuse.contents = UIColor.lightGray
 
         guard let device = sceneView.device else {
             show(status: FaceplantError.metalUnavailable.description)
@@ -151,10 +169,15 @@ final class RecordViewController: UIViewController {
 
     private func prepareBakerIfNeeded(anchor: ARFaceAnchor) {
         guard baker == nil, let device else { return }
-        let topology = FaceMeshTopology(geometry: anchor.geometry)
+        // 烘焙与预览都用加盖后的拓扑，录制包里写的仍是 ARKit 原始拓扑
+        let capping = FaceMeshCapping(base: FaceMeshTopology(geometry: anchor.geometry))
         do {
-            baker = try FaceTextureBaker(device: device, topology: topology, textureSize: Self.textureSize)
-            liveSource = LiveFaceMeshSource(topology: topology)
+            let baker = try FaceTextureBaker(device: device, topology: capping.topology, textureSize: Self.textureSize)
+            let liveSource = LiveFaceMeshSource(topology: capping.topology)
+            self.baker = baker
+            self.capping = capping
+            self.liveSource = liveSource
+            preview.withLock { $0 = Preview(geometry: SceneKitFaceGeometry(topology: capping.topology), source: liveSource) }
         } catch {
             show(status: "baker init failed: \(error)")
         }
@@ -162,11 +185,13 @@ final class RecordViewController: UIViewController {
 
     private func handle(frame: ARFrame) {
         guard let anchor = latestAnchor, anchor.isTracked,
-              let baker, let textureCache, let liveSource else { return }
+              let baker, let capping, let textureCache, let liveSource else { return }
         let viewport = viewportSize.withLock { $0 }
         guard viewport.width > 0, viewport.height > 0 else { return }
 
+        // 录制写原始帧，烘焙与预览用加盖后的帧
         let meshFrame = FaceMeshFrame(anchor: anchor, timestamp: frame.timestamp)
+        let cappedFrame = capping.extend(meshFrame)
         do {
             let planes = try textureCache.cameraPlanes(for: frame.capturedImage)
             let uniforms = ProjectionMath.bakeUniforms(
@@ -174,7 +199,7 @@ final class RecordViewController: UIViewController {
             )
             let recorder = recorder
             var captureError: Error?
-            let texture = baker.bake(vertices: meshFrame.vertices, uniforms: uniforms, camera: planes) { commandBuffer, baked in
+            let texture = baker.bake(vertices: cappedFrame.vertices, uniforms: uniforms, camera: planes) { commandBuffer, baked in
                 guard let recorder else { return }
                 do {
                     try recorder.capture(frame: meshFrame, baked: baked, commandBuffer: commandBuffer)
@@ -183,11 +208,11 @@ final class RecordViewController: UIViewController {
                 }
             }
             textureCache.flush()
-            liveSource.update(frame: meshFrame, texture: texture)
+            liveSource.update(frame: cappedFrame, texture: texture)
 
             let elapsed = recorder?.elapsed
             DispatchQueue.main.async { [weak self] in
-                self?.faceGeometry?.firstMaterial?.diffuse.contents = texture
+                self?.previewMaterial.diffuse.contents = texture
                 if let elapsed {
                     self?.timerLabel.text = String(format: "%04.1f", elapsed)
                 }
@@ -220,7 +245,7 @@ final class RecordViewController: UIViewController {
 
     /// delegate 队列
     private func startRecording() {
-        guard recorder == nil, let baker, let textureCache else {
+        guard recorder == nil, let baker, let capping, let textureCache else {
             show(status: "还没检测到人脸，稍等再按")
             DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }
             return
@@ -229,7 +254,7 @@ final class RecordViewController: UIViewController {
             let store = try FaceRecordingStore()
             recorder = try FaceRecorder(
                 packageURL: store.makePackageURL(),
-                topology: baker.topology,
+                topology: capping.base,
                 textureSize: baker.textureSize,
                 textureCache: textureCache
             )
@@ -281,21 +306,31 @@ final class RecordViewController: UIViewController {
     }
 }
 
-// MARK: - ARSCNViewDelegate
+// MARK: - ARSCNViewDelegate（SceneKit 渲染线程）
 
 extension RecordViewController: ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-        guard anchor is ARFaceAnchor, let device, let geometry = ARSCNFaceGeometry(device: device) else { return nil }
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        material.diffuse.contents = UIColor.lightGray
-        geometry.materials = [material]
-        faceGeometry = geometry
-        return SCNNode(geometry: geometry)
+        guard anchor is ARFaceAnchor else { return nil }
+        let node = SCNNode()
+        if FaceRenderOptions.showsEyeballs {
+            let leftEye = EyeballNode.make(material: eyeMaterial)
+            let rightEye = EyeballNode.make(material: eyeMaterial)
+            node.addChildNode(leftEye)
+            node.addChildNode(rightEye)
+            leftEyeNode = leftEye
+            rightEyeNode = rightEye
+        }
+        return node
     }
 
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         guard let faceAnchor = anchor as? ARFaceAnchor else { return }
-        faceGeometry?.update(from: faceAnchor.geometry)
+        let preview = preview.withLock { $0 }
+        let frame = preview?.source.currentFrame(at: 0)
+        if let preview, let frame, let geometry = preview.geometry.makeGeometry(vertices: frame.vertices, material: previewMaterial) {
+            node.geometry = geometry
+        }
+        leftEyeNode?.simdTransform = faceAnchor.leftEyeTransform
+        rightEyeNode?.simdTransform = faceAnchor.rightEyeTransform
     }
 }

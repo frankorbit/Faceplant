@@ -8,9 +8,12 @@ final class MeshStreamWriter {
     private(set) var frameCount: UInt32 = 0
     private var isFinished = false
 
-    init(url: URL, vertexCount: Int, includesBlendShapes: Bool) throws {
+    init(url: URL, vertexCount: Int, includesBlendShapes: Bool, includesEyeTransforms: Bool) throws {
         self.vertexCount = vertexCount
-        flags = includesBlendShapes ? [.halfFloatVertices, .blendShapes] : [.halfFloatVertices]
+        var flags: MeshStreamFormat.Flags = [.halfFloatVertices]
+        if includesBlendShapes { flags.insert(.blendShapes) }
+        if includesEyeTransforms { flags.insert(.eyeTransforms) }
+        self.flags = flags
 
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
             throw FaceplantError.recordingSetupFailed("无法创建 \(url.lastPathComponent)")
@@ -51,6 +54,12 @@ final class MeshStreamWriter {
                 throw FaceplantError.meshStreamCorrupted("blendShape 数量 \(blendShapes.count) 不符")
             }
             data.appendArray(blendShapes)
+        }
+
+        if flags.contains(.eyeTransforms) {
+            // 没有眼球数据的帧写单位矩阵，读回后眼球会停在脸原点；录制路径总是带眼球，这只是兜底
+            let eyes = frame.eyes ?? EyePose(left: matrix_identity_float4x4, right: matrix_identity_float4x4)
+            data.appendArray(eyes.left.flattened + eyes.right.flattened)
         }
 
         try handle.write(contentsOf: data)

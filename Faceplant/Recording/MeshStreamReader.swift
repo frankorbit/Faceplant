@@ -41,8 +41,20 @@ enum MeshStreamReader {
             var blendShapes: [Float]?
             if flags.contains(.blendShapes) {
                 blendShapes = data.loadArray(at: offset, count: BlendShapeOrder.count)
+                offset += BlendShapeOrder.count * MemoryLayout<Float>.size
             }
-            frames.append(FaceMeshFrame(timestamp: timestamp, vertices: vertices, blendShapes: blendShapes))
+
+            var eyes: EyePose?
+            if flags.contains(.eyeTransforms) {
+                let floats: [Float] = data.loadArray(at: offset, count: MeshStreamFormat.eyeFloatCount)
+                guard let left = simd_float4x4(flattened: Array(floats[0 ..< 16])),
+                      let right = simd_float4x4(flattened: Array(floats[16 ..< 32]))
+                else {
+                    throw FaceplantError.meshStreamCorrupted("第 \(index) 帧眼球变换损坏")
+                }
+                eyes = EyePose(left: left, right: right)
+            }
+            frames.append(FaceMeshFrame(timestamp: timestamp, vertices: vertices, blendShapes: blendShapes, eyes: eyes))
         }
         return frames
     }

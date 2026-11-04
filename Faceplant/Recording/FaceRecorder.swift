@@ -53,7 +53,8 @@ final class FaceRecorder {
         meshWriter = try MeshStreamWriter(
             url: packageURL.appendingPathComponent(FaceRecording.meshFileName),
             vertexCount: topology.vertexCount,
-            includesBlendShapes: true
+            includesBlendShapes: true,
+            includesEyeTransforms: true
         )
 
         let textureURL = packageURL.appendingPathComponent(FaceRecording.textureFileName)
