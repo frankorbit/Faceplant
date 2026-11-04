@@ -18,11 +18,29 @@ just format   # 自动格式化
 
 `Faceplant.xcodeproj` 不入库，clone 后先执行 `just gen` 生成。人脸追踪不能在模拟器上跑，运行必须用真机。打开工程后在 Signing 里选自己的 Team 即可。
 
-## 当前阶段：M1 录制（代码完成，待真机验收）
+## 当前阶段：M2 放置（代码完成，待真机验收）
 
-流程：首页 → 录制新脸 → 录制页（前置摄像头，实时显示烘焙贴图）→ 按红钮录 5 到 15 秒 → 自动进入 Face Review 回放。
+流程：Face Review → Make your face → 放置页（后置摄像头）→ 点击墙面，脸从墙里凸出来并循环回放表情。右上角"调参"可以实时改淡出带、拉伸、鼓包、鼻尖距离等参数。
+
+录制页改成了原版那样的上下分屏：上半是一面程序生成的砖墙，实时显示当前人脸种在墙上的效果，单指拖动转角度、双指捏合拉远拉近、双击复位，"换墙"可以选相册里的照片；下半是前置摄像头。调参面板和放置页共用，调效果不用先录一段。
 
 真机验收清单：
+
+| 检查 | 期望 |
+|---|---|
+| 点击墙面 | 脸出现在点击处，+z 朝外，头顶朝上；桌面上放置时头顶朝远离自己的方向 |
+| 绕着走 | 脸贴在墙上不漂移；侧看能看到鼻子、嘴唇的起伏，墙后的部分被切掉 |
+| 墙纹 | 脸周围的墙纹向外拉伸，过渡带内墙纹盖在脸颊上，和原版砖墙视频一致 |
+| 回放 | 表情循环播放，贴图与嘴型同步 |
+| 录制页上半 | 脸整个伸出砖墙，鼻尖约 5 cm；额头、下巴被砖纹包住，四周是平滑鼓包，没有空洞和硬边 |
+| 调参 | 滑杆实时生效；记下顺眼的一组值回填 `FaceRenderParameters.standard` |
+| 帧率 | Xcode Debug Navigator 里 FPS 接近 60 |
+
+## M1 录制（已完成）
+
+2026-11-04 在 iPhone 16 上验收通过。流程：首页 → 录制新脸 → 录制页（前置摄像头，实时显示烘焙贴图）→ 按红钮录 5 到 15 秒 → 自动进入 Face Review 回放。
+
+当时的验收清单：
 
 | 检查 | 期望 |
 |---|---|
@@ -89,8 +107,9 @@ Faceplant/
 ├── FaceMesh/       网格帧、拓扑、blendShape 顺序、FaceMeshSource 协议与实时实现
 ├── Recording/      .faceplant 包模型、mesh.bin 读写、FaceRecorder、Store
 ├── Playback/       FaceRecordingPlayer（视频时钟 + 顶点插值）、SceneKit 回放视图
-├── Rendering/      Metal 烘焙 pass、像素缓冲纹理缓存、投影数学、共享 shader 类型
-├── UI/             Home、Record、Review 三个页面
+├── Placement/      raycast 结果到脸的世界变换
+├── Rendering/      Metal 烘焙 pass、放置渲染器（背景 + 脸 pass）、可调参数、像素缓冲纹理缓存、投影数学、共享 shader 类型
+├── UI/             Home、Record、Review、Place 四个页面与调参面板
 ├── Spikes/         M0 的两个验证页面，M2 后删除
 └── Support/        错误类型、二进制读写辅助
 ```

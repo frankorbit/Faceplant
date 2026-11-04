@@ -12,6 +12,7 @@ enum FaceplantError: Error, CustomStringConvertible {
     case bufferCreationFailed(label: String)
     case textureCreationFailed(label: String)
     case faceTrackingUnsupported
+    case worldTrackingUnsupported
     case frontCameraUnavailable
     case recordingSetupFailed(String)
     case meshStreamCorrupted(String)
@@ -30,6 +31,7 @@ enum FaceplantError: Error, CustomStringConvertible {
         case let .bufferCreationFailed(label): "创建 MTLBuffer 失败: \(label)"
         case let .textureCreationFailed(label): "创建 MTLTexture 失败: \(label)"
         case .faceTrackingUnsupported: "设备不支持人脸追踪"
+        case .worldTrackingUnsupported: "设备不支持世界追踪"
         case .frontCameraUnavailable: "找不到前置摄像头"
         case let .recordingSetupFailed(reason): "录制初始化失败: \(reason)"
         case let .meshStreamCorrupted(reason): "顶点流损坏: \(reason)"

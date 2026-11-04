@@ -1,34 +1,40 @@
 import ARKit
 import Metal
 import os
+import PhotosUI
 import SceneKit
 import UIKit
 
-/// 录制页：前置摄像头人脸追踪，实时显示烘焙贴图，按钮开始/停止录制。
+/// 录制页，和原版一样上下分屏：
+/// - 上半：静态墙面上的实时效果（`FaceplantRenderer` 的 still 场景，默认程序生成的砖墙，可换相册里的照片），
+///   和放置页走同一套 shader，调参面板两边共用，不用录一段再去墙上看。
+/// - 下半：前置摄像头画面叠加烘焙贴图后的网格，按钮开始/停止录制。
 ///
 /// 职责划分：
 /// - 生命周期与 UI：本类
 /// - 会话：ARSessionController（独立 delegate 队列）
 /// - 每帧烘焙与录制：`handle(frame:)`，在 delegate 队列执行
-/// - 显示：ARSCNView，脸节点的几何由 `LiveFaceMeshSource` 的最新帧（含加盖）在渲染线程重建，
-///   与 Review 页用同一套 `SceneKitFaceGeometry`，不用 ARSCNFaceGeometry 是因为它带洞
+/// - 下半显示：ARSCNView，脸节点的几何由 `LiveFaceMeshSource` 的最新帧（含加盖）在渲染线程重建
 final class RecordViewController: UIViewController {
     var onFinish: ((FaceRecording) -> Void)?
 
     private static let logger = Logger(subsystem: "com.frank.faceplant", category: "record")
     private static let textureSize = 1024
-
+    private let previewView = WallPreviewView()
     private let sceneView = ARSCNView()
     private let sessionController = ARSessionController()
     private let recordButton = UIButton(type: .custom)
     private let timerLabel = UILabel()
     private let statusLabel = UILabel()
+    private let panel = ParameterPanel()
+    private let panelButton = UIButton(type: .system)
+    private let backgroundButton = UIButton(type: .system)
 
     private var device: MTLDevice?
     private var textureCache: PixelBufferTextureCache?
     private let viewportSize = OSAllocatedUnfairLock(initialState: CGSize.zero)
 
-    /// 预览几何与数据源。delegate 队列写一次，SceneKit 渲染线程每帧读。
+    /// 下半预览几何与数据源。delegate 队列写一次，SceneKit 渲染线程每帧读。
     private struct Preview {
         let geometry: SceneKitFaceGeometry
         let source: LiveFaceMeshSource
@@ -55,8 +61,9 @@ final class RecordViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        setupSceneView()
+        setupViews()
         setupControls()
+        setupRendering()
         bindSession()
     }
 
@@ -74,10 +81,12 @@ final class RecordViewController: UIViewController {
         } catch {
             show(status: "\(error)")
         }
+        previewView.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        previewView.isPaused = true
         sessionController.delegateQueue.async { [weak self] in
             self?.recorder?.discard()
             self?.recorder = nil
@@ -87,15 +96,23 @@ final class RecordViewController: UIViewController {
 
     // MARK: - Setup
 
-    private func setupSceneView() {
+    private func setupViews() {
+        previewView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(previewView)
+
         sceneView.translatesAutoresizingMaskIntoConstraints = false
         sceneView.automaticallyUpdatesLighting = false
         sceneView.rendersCameraGrain = false
         sceneView.session = sessionController.session
         sceneView.delegate = self
         view.addSubview(sceneView)
+
         NSLayoutConstraint.activate([
-            sceneView.topAnchor.constraint(equalTo: view.topAnchor),
+            previewView.topAnchor.constraint(equalTo: view.topAnchor),
+            previewView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            previewView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            previewView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.5),
+            sceneView.topAnchor.constraint(equalTo: previewView.bottomAnchor),
             sceneView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             sceneView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             sceneView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -116,40 +133,13 @@ final class RecordViewController: UIViewController {
         }
     }
 
-    private func setupControls() {
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.numberOfLines = 0
-        statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        statusLabel.textColor = .white
-        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        view.addSubview(statusLabel)
-
-        timerLabel.translatesAutoresizingMaskIntoConstraints = false
-        timerLabel.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
-        timerLabel.textColor = .white
-        timerLabel.text = "00.0"
-        view.addSubview(timerLabel)
-
-        recordButton.translatesAutoresizingMaskIntoConstraints = false
-        recordButton.backgroundColor = .systemRed
-        recordButton.layer.cornerRadius = 36
-        recordButton.layer.borderWidth = 4
-        recordButton.layer.borderColor = UIColor.white.cgColor
-        recordButton.accessibilityLabel = "开始录制"
-        recordButton.addTarget(self, action: #selector(toggleRecording), for: .touchUpInside)
-        view.addSubview(recordButton)
-
-        NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            recordButton.widthAnchor.constraint(equalToConstant: 72),
-            recordButton.heightAnchor.constraint(equalToConstant: 72),
-            recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            recordButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-            timerLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            timerLabel.bottomAnchor.constraint(equalTo: recordButton.topAnchor, constant: -12),
-        ])
+    private func setupRendering() {
+        guard let device else { return }
+        do {
+            try previewView.configure(device: device)
+        } catch {
+            show(status: "预览初始化失败: \(error)")
+        }
     }
 
     private func bindSession() {
@@ -178,6 +168,7 @@ final class RecordViewController: UIViewController {
             self.capping = capping
             self.liveSource = liveSource
             preview.withLock { $0 = Preview(geometry: SceneKitFaceGeometry(topology: capping.topology), source: liveSource) }
+            DispatchQueue.main.async { [weak self] in self?.previewView.source = liveSource }
         } catch {
             show(status: "baker init failed: \(error)")
         }
@@ -306,6 +297,24 @@ final class RecordViewController: UIViewController {
     }
 }
 
+// MARK: - PHPickerViewControllerDelegate
+
+extension RecordViewController: PHPickerViewControllerDelegate {
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true)
+        guard let provider = results.first?.itemProvider, provider.canLoadObject(ofClass: UIImage.self) else { return }
+        provider.loadObject(ofClass: UIImage.self) { [weak self] object, error in
+            DispatchQueue.main.async {
+                if let image = object as? UIImage {
+                    self?.applyBackground(image)
+                } else if let error {
+                    self?.show(status: "读取照片失败: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+}
+
 // MARK: - ARSCNViewDelegate（SceneKit 渲染线程）
 
 extension RecordViewController: ARSCNViewDelegate {
@@ -332,5 +341,99 @@ extension RecordViewController: ARSCNViewDelegate {
         }
         leftEyeNode?.simdTransform = faceAnchor.leftEyeTransform
         rightEyeNode?.simdTransform = faceAnchor.rightEyeTransform
+    }
+}
+
+// MARK: - 控件搭建与预览控制（主线程）
+
+private extension RecordViewController {
+    func setupControls() {
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.numberOfLines = 0
+        statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        statusLabel.textColor = .white
+        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        view.addSubview(statusLabel)
+
+        timerLabel.translatesAutoresizingMaskIntoConstraints = false
+        timerLabel.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
+        timerLabel.textColor = .white
+        timerLabel.text = "00.0"
+        view.addSubview(timerLabel)
+
+        recordButton.translatesAutoresizingMaskIntoConstraints = false
+        recordButton.backgroundColor = .systemRed
+        recordButton.layer.cornerRadius = 36
+        recordButton.layer.borderWidth = 4
+        recordButton.layer.borderColor = UIColor.white.cgColor
+        recordButton.accessibilityLabel = "开始录制"
+        recordButton.addTarget(self, action: #selector(toggleRecording), for: .touchUpInside)
+        view.addSubview(recordButton)
+
+        panelButton.configuration = Self.overlayButtonConfiguration(title: "调参")
+        panelButton.translatesAutoresizingMaskIntoConstraints = false
+        panelButton.addTarget(self, action: #selector(togglePanel), for: .touchUpInside)
+        view.addSubview(panelButton)
+
+        backgroundButton.configuration = Self.overlayButtonConfiguration(title: "换墙")
+        backgroundButton.translatesAutoresizingMaskIntoConstraints = false
+        backgroundButton.addTarget(self, action: #selector(pickBackground), for: .touchUpInside)
+        view.addSubview(backgroundButton)
+
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.isHidden = true
+        panel.onChange = { [weak self] parameters in self?.previewView.parameters = parameters }
+        view.addSubview(panel)
+
+        NSLayoutConstraint.activate([
+            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: backgroundButton.leadingAnchor, constant: -8),
+            panelButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            panelButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            backgroundButton.topAnchor.constraint(equalTo: panelButton.topAnchor),
+            backgroundButton.trailingAnchor.constraint(equalTo: panelButton.leadingAnchor, constant: -8),
+            panel.topAnchor.constraint(equalTo: panelButton.bottomAnchor, constant: 8),
+            panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            recordButton.widthAnchor.constraint(equalToConstant: 72),
+            recordButton.heightAnchor.constraint(equalToConstant: 72),
+            recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            recordButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            timerLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            timerLabel.bottomAnchor.constraint(equalTo: recordButton.topAnchor, constant: -12),
+        ])
+    }
+
+    static func overlayButtonConfiguration(title: String) -> UIButton.Configuration {
+        var config = UIButton.Configuration.filled()
+        config.title = title
+        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.5)
+        config.baseForegroundColor = .white
+        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
+        return config
+    }
+
+    // MARK: - 预览控制（主线程）
+
+    @objc func togglePanel() {
+        panel.isHidden.toggle()
+    }
+
+    @objc func pickBackground() {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
+    func applyBackground(_ image: UIImage) {
+        do {
+            try previewView.setBackground(image: image)
+        } catch {
+            show(status: "换墙失败: \(error)")
+        }
     }
 }

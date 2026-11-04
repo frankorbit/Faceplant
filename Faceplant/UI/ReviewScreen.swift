@@ -1,7 +1,7 @@
 import Metal
 import SwiftUI
 
-/// Face Review：回放录好的脸，分享贴图视频，或删除。"Make your face" 在 M2 接入放置流程。
+/// Face Review：回放录好的脸，分享贴图视频，进入放置页，或删除。
 struct ReviewScreen: View {
     let recording: FaceRecording
 
@@ -9,6 +9,7 @@ struct ReviewScreen: View {
     @State private var player: FaceRecordingPlayer?
     @State private var isPlaying = false
     @State private var errorMessage: String?
+    @State private var showPlacement = false
 
     var body: some View {
         ScrollView {
@@ -37,11 +38,9 @@ struct ReviewScreen: View {
                     Label("分享贴图视频", systemImage: "square.and.arrow.up")
                 }
 
-                Button("Make your face") {}
-                    .disabled(true)
-                Text("放置到墙面在 M2 接入")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button("Make your face") { showPlacement = true }
+                    .buttonStyle(.bordered)
+                    .disabled(player == nil)
 
                 Button("删除这段录制", role: .destructive) { deleteRecording() }
                     .padding(.top, 8)
@@ -52,6 +51,9 @@ struct ReviewScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: loadPlayer)
         .onDisappear { player?.pause() }
+        .navigationDestination(isPresented: $showPlacement) {
+            PlaceScreen(recording: recording)
+        }
         .alert("出错了", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("好") {}
         } message: {

@@ -31,6 +31,18 @@ final class ARSessionController: NSObject {
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
 
+    /// 后置摄像头世界追踪，检测竖直与水平平面，供放置页使用
+    func runWorldTracking() throws {
+        guard ARWorldTrackingConfiguration.isSupported else { throw FaceplantError.worldTrackingUnsupported }
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.planeDetection = [.vertical, .horizontal]
+        configuration.environmentTexturing = .none
+        configuration.isLightEstimationEnabled = false
+        session.delegate = self
+        session.delegateQueue = delegateQueue
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+    }
+
     func pause() {
         session.pause()
     }

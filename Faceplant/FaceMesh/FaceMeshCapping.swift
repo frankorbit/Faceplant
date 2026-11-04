@@ -59,8 +59,22 @@ struct FaceMeshCapping {
 
     // MARK: - 边界环
 
-    /// 返回除外轮廓外的所有边界环。环上顶点按原网格三角形的方向排列（a→b 是某个三角形的一条有向边）。
+    /// 返回除外轮廓外的所有边界环。
     static func holeLoops(in triangleIndices: [Int16]) -> [[Int]] {
+        var loops = boundaryLoops(in: triangleIndices)
+        // 最长的一环是脸的外轮廓，不加盖
+        guard let outerIndex = loops.indices.max(by: { loops[$0].count < loops[$1].count }) else { return [] }
+        loops.remove(at: outerIndex)
+        return loops
+    }
+
+    /// 最长的边界环，即脸的外轮廓；裙边沿着它生成
+    static func outerLoop(in triangleIndices: [Int16]) -> [Int]? {
+        boundaryLoops(in: triangleIndices).max(by: { $0.count < $1.count })
+    }
+
+    /// 所有边界环。环上顶点按原网格三角形的方向排列（a→b 是某个三角形的一条有向边）。
+    static func boundaryLoops(in triangleIndices: [Int16]) -> [[Int]] {
         var directedCount = [DirectedEdge: Int]()
         var undirectedCount = [UndirectedEdge: Int]()
         for base in stride(from: 0, to: triangleIndices.count - 2, by: 3) {
@@ -89,15 +103,11 @@ struct FaceMeshCapping {
                 loop.append(current)
                 current = following
             }
-            // 没回到起点说明边界不是流形，这段不加盖
+            // 没回到起点说明边界不是流形，这段丢弃
             if current == start, loop.count >= 3 {
                 loops.append(loop)
             }
         }
-
-        // 最长的一环是脸的外轮廓，不加盖
-        guard let outerIndex = loops.indices.max(by: { loops[$0].count < loops[$1].count }) else { return [] }
-        loops.remove(at: outerIndex)
         return loops
     }
 
