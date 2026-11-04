@@ -124,6 +124,8 @@ final class PlaceViewController: UIViewController {
             panel.topAnchor.constraint(equalTo: panelButton.bottomAnchor, constant: 8),
             panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            // 参数多了面板内部滚动，不盖住整屏
+            panel.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: 0.6),
             hintLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             hintLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
             hintLabel.heightAnchor.constraint(equalToConstant: 36),

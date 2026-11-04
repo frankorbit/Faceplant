@@ -396,6 +396,8 @@ private extension RecordViewController {
             panel.topAnchor.constraint(equalTo: panelButton.bottomAnchor, constant: 8),
             panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            // 参数多了面板内部滚动，不盖住整屏
+            panel.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: 0.6),
             recordButton.widthAnchor.constraint(equalToConstant: 72),
             recordButton.heightAnchor.constraint(equalToConstant: 72),
             recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),

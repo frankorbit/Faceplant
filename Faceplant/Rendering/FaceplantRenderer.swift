@@ -15,7 +15,7 @@ import simd
 final class FaceplantRenderer: NSObject {
     enum Scene {
         case ar(ARSession)
-        /// 静态墙面：脸在原点，墙是 z = 0 平面上一块按 `wallTileSize` 平铺的贴图，相机绕脸环绕
+        /// 静态墙面：脸在原点，墙是 z = 0 平面上一块按 `parameters.wallTileSize` 平铺的贴图，相机绕脸环绕
         case still(background: MTLTexture, camera: OrbitCamera)
 
         var isStill: Bool {
@@ -23,9 +23,6 @@ final class FaceplantRenderer: NSObject {
             return false
         }
     }
-
-    /// 静态墙面上一张贴图铺多大（米）。砖墙贴图一行 6 块砖，1 米正好是 17 cm 一块
-    static let wallTileSize: Float = 1.0
 
     private static let logger = Logger(subsystem: "com.frank.faceplant", category: "renderer")
     private static let inflightCount = 3
@@ -209,7 +206,7 @@ final class FaceplantRenderer: NSObject {
     /// 让外轮廓最低点离墙 rimClearance，整张网格都在墙前、不被切，鼓包把轮廓到墙面全部包住；
     /// sinkDepth 再把脸往墙里按，按进去的部分由切平面处理
     private static func depthOffset(rimMinZ: Float, parameters: FaceRenderParameters) -> Float {
-        FaceRenderParameters.rimClearance - rimMinZ * parameters.depthScale - parameters.sinkDepth
+        parameters.rimClearance - rimMinZ * parameters.depthScale - parameters.sinkDepth
     }
 
     /// 墙前顶点在 xy 平面上的包围盒：中心与半径。全在墙后时退回整张网格。
@@ -445,9 +442,9 @@ extension FaceplantRenderer: MTKViewDelegate {
             faceCenter: mesh.faceCenter,
             faceRadius: mesh.faceRadius,
             // 贴图 v 轴朝下而脸局部 y 轴朝上，y 取反
-            wallScale: SIMD2<Float>(1 / Self.wallTileSize, -1 / Self.wallTileSize),
+            wallScale: SIMD2<Float>(1 / parameters.wallTileSize, -1 / parameters.wallTileSize),
             wallOffset: SIMD2<Float>(repeating: 0.5),
-            faceTint: parameters.faceTint,
+            faceTint: parameters.faceTint * parameters.faceBrightness,
             edgeFade: parameters.edgeFade,
             sideFade: parameters.sideFade,
             warpStrength: parameters.warpStrength,
