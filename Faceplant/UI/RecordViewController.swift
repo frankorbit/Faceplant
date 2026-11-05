@@ -55,8 +55,10 @@ final class RecordViewController: UIViewController {
     private var liveSource: LiveFaceMeshSource?
     private var recorder: FaceRecorder?
 
-    /// 主线程
+    /// 以下主线程
     private var isRecording = false
+    /// 麦克风授权结果；拒绝时照常录脸，只是没有声音
+    private var microphoneGranted = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -75,13 +77,25 @@ final class RecordViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        previewView.isPaused = false
+        // 先问麦克风再起会话：providesAudioData 在没授权时拿不到声音，之后也不会补
+        MicrophonePermission.request { [weak self] granted in
+            guard let self, view.window != nil else { return }
+            microphoneGranted = granted
+            startSession(withAudio: granted)
+        }
+    }
+
+    private func startSession(withAudio: Bool) {
         do {
-            try sessionController.runFaceTracking()
-            show(status: "对准前置摄像头")
+            if withAudio {
+                try AudioSessionConfigurator.activate(.recording)
+            }
+            try sessionController.runFaceTracking(providesAudio: withAudio)
+            show(status: withAudio ? "对准前置摄像头" : "没有麦克风权限，只录脸不录声音")
         } catch {
             show(status: "\(error)")
         }
-        previewView.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -149,6 +163,9 @@ final class RecordViewController: UIViewController {
         }
         sessionController.onFrame = { [weak self] frame in
             self?.handle(frame: frame)
+        }
+        sessionController.onAudio = { [weak self] sampleBuffer in
+            self?.recorder?.appendAudio(sampleBuffer)
         }
         sessionController.onFailure = { [weak self] error in
             self?.show(status: "session failed: \(error.localizedDescription)")
@@ -230,12 +247,13 @@ final class RecordViewController: UIViewController {
             sessionController.delegateQueue.async { [weak self] in self?.stopRecording() }
         } else {
             setRecordingUI(true)
-            sessionController.delegateQueue.async { [weak self] in self?.startRecording() }
+            let withAudio = microphoneGranted
+            sessionController.delegateQueue.async { [weak self] in self?.startRecording(withAudio: withAudio) }
         }
     }
 
     /// delegate 队列
-    private func startRecording() {
+    private func startRecording(withAudio: Bool) {
         guard recorder == nil, let baker, let capping, let textureCache else {
             show(status: "还没检测到人脸，稍等再按")
             DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }
@@ -247,9 +265,10 @@ final class RecordViewController: UIViewController {
                 packageURL: store.makePackageURL(),
                 topology: capping.base,
                 textureSize: baker.textureSize,
-                textureCache: textureCache
+                textureCache: textureCache,
+                includesAudio: withAudio
             )
-            show(status: "录制中，做几个夸张表情")
+            show(status: withAudio ? "录制中，说句话、做几个夸张表情" : "录制中，做几个夸张表情")
         } catch {
             show(status: "无法开始录制: \(error)")
             DispatchQueue.main.async { [weak self] in self?.setRecordingUI(false) }

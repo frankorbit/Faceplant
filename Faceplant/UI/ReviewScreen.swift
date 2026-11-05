@@ -22,7 +22,7 @@ struct ReviewScreen: View {
                     thumbnail
                     VStack(alignment: .leading, spacing: 4) {
                         Text(String(format: "%.1f 秒 · %d 帧", recording.manifest.duration, recording.manifest.meshFrameCount))
-                        Text("\(recording.manifest.textureSize)² 贴图 · \(recording.manifest.deviceModel)")
+                        Text("\(recording.manifest.textureSize)² 贴图 · \(recording.manifest.hasAudio ? "有声音" : "无声音")")
                         Text(recording.manifest.createdAt, style: .date)
                     }
                     .font(.footnote)
@@ -78,6 +78,8 @@ struct ReviewScreen: View {
 
     private func loadPlayer() {
         guard player == nil else { return }
+        // 录制带声音，走外放；失败不影响画面
+        try? AudioSessionConfigurator.activate(.playback)
         guard let device = MTLCreateSystemDefaultDevice() else {
             errorMessage = FaceplantError.metalUnavailable.description
             return

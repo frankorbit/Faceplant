@@ -19,6 +19,12 @@ enum FaceplantError: Error, CustomStringConvertible {
     case recordingPackageInvalid(String)
     case thumbnailFailed
     case playbackSetupFailed(String)
+    case microphoneDenied
+    case messageSaveFailed(String)
+    case messagePackageInvalid(String)
+    case callMessageCorrupted(String)
+    case videoCodecFailed(String)
+    case audioPlayoutFailed(String)
 
     var description: String {
         switch self {
@@ -38,6 +44,12 @@ enum FaceplantError: Error, CustomStringConvertible {
         case let .recordingPackageInvalid(reason): "录制包无效: \(reason)"
         case .thumbnailFailed: "生成缩略图失败"
         case let .playbackSetupFailed(reason): "回放初始化失败: \(reason)"
+        case .microphoneDenied: "没有麦克风权限，去设置里打开后再录"
+        case let .messageSaveFailed(reason): "保存留言失败: \(reason)"
+        case let .messagePackageInvalid(reason): "留言包无效: \(reason)"
+        case let .callMessageCorrupted(reason): "通话数据损坏: \(reason)"
+        case let .videoCodecFailed(reason): "视频编解码失败: \(reason)"
+        case let .audioPlayoutFailed(reason): "音频播放失败: \(reason)"
         }
     }
 }

@@ -1,5 +1,4 @@
 import Foundation
-import simd
 
 /// 一次性把 mesh.bin 读进内存。十几秒的录制只有几 MB，不需要流式读取。
 enum MeshStreamReader {
@@ -28,33 +27,8 @@ enum MeshStreamReader {
         var frames = [FaceMeshFrame]()
         frames.reserveCapacity(frameCount)
         for index in 0 ..< frameCount {
-            var offset = MeshStreamFormat.headerSize + index * frameSize
-            let timestamp: Float64 = data.loadValue(at: offset)
-            offset += MemoryLayout<Float64>.size
-
-            let halves: [Float16] = data.loadArray(at: offset, count: vertexCount * 3)
-            offset += vertexCount * 3 * MemoryLayout<Float16>.size
-            let vertices = stride(from: 0, to: halves.count, by: 3).map {
-                SIMD3<Float>(Float(halves[$0]), Float(halves[$0 + 1]), Float(halves[$0 + 2]))
-            }
-
-            var blendShapes: [Float]?
-            if flags.contains(.blendShapes) {
-                blendShapes = data.loadArray(at: offset, count: BlendShapeOrder.count)
-                offset += BlendShapeOrder.count * MemoryLayout<Float>.size
-            }
-
-            var eyes: EyePose?
-            if flags.contains(.eyeTransforms) {
-                let floats: [Float] = data.loadArray(at: offset, count: MeshStreamFormat.eyeFloatCount)
-                guard let left = simd_float4x4(flattened: Array(floats[0 ..< 16])),
-                      let right = simd_float4x4(flattened: Array(floats[16 ..< 32]))
-                else {
-                    throw FaceplantError.meshStreamCorrupted("第 \(index) 帧眼球变换损坏")
-                }
-                eyes = EyePose(left: left, right: right)
-            }
-            frames.append(FaceMeshFrame(timestamp: timestamp, vertices: vertices, blendShapes: blendShapes, eyes: eyes))
+            let offset = MeshStreamFormat.headerSize + index * frameSize
+            try frames.append(MeshFrameCodec.decode(data, at: offset, vertexCount: vertexCount, flags: flags))
         }
         return frames
     }

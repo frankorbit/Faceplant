@@ -32,37 +32,7 @@ final class MeshStreamWriter {
 
     func append(_ frame: FaceMeshFrame) throws {
         guard !isFinished else { throw FaceplantError.recordingSetupFailed("MeshStreamWriter 已结束") }
-        guard frame.vertices.count == vertexCount else {
-            throw FaceplantError.meshStreamCorrupted("顶点数 \(frame.vertices.count) 与拓扑 \(vertexCount) 不符")
-        }
-
-        var data = Data(capacity: MeshStreamFormat.frameByteCount(vertexCount: vertexCount, flags: flags))
-        data.appendValue(frame.timestamp)
-
-        var halves = [Float16]()
-        halves.reserveCapacity(vertexCount * 3)
-        for vertex in frame.vertices {
-            halves.append(Float16(vertex.x))
-            halves.append(Float16(vertex.y))
-            halves.append(Float16(vertex.z))
-        }
-        data.appendArray(halves)
-
-        if flags.contains(.blendShapes) {
-            let blendShapes = frame.blendShapes ?? Array(repeating: 0, count: BlendShapeOrder.count)
-            guard blendShapes.count == BlendShapeOrder.count else {
-                throw FaceplantError.meshStreamCorrupted("blendShape 数量 \(blendShapes.count) 不符")
-            }
-            data.appendArray(blendShapes)
-        }
-
-        if flags.contains(.eyeTransforms) {
-            // 没有眼球数据的帧写单位矩阵，读回后眼球会停在脸原点；录制路径总是带眼球，这只是兜底
-            let eyes = frame.eyes ?? EyePose(left: matrix_identity_float4x4, right: matrix_identity_float4x4)
-            data.appendArray(eyes.left.flattened + eyes.right.flattened)
-        }
-
-        try handle.write(contentsOf: data)
+        try handle.write(contentsOf: MeshFrameCodec.encode(frame, vertexCount: vertexCount, flags: flags))
         frameCount += 1
     }
 

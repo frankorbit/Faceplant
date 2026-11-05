@@ -20,8 +20,17 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_faceplant-call._tcp</string>
+		<string>_faceplant-call._udp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Faceplant 需要前置摄像头录制你的脸，并用后置摄像头把它放到墙上。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Faceplant 通过本地网络和附近的设备建立 3D 人脸通话。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Faceplant 录脸时同时录下你的声音，附近通话时把声音传给对方。</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>

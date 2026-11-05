@@ -4,12 +4,15 @@ import Foundation
 import Metal
 import os
 
-/// 把烘焙贴图与网格帧写成一个 `.faceplant` 包。
+/// 把烘焙贴图、网格帧与麦克风声音写成一个 `.faceplant` 包。
 ///
 /// 线程约束：
-/// - `capture` 在 ARSession delegate 队列调用，顶点流在该队列同步写入。
-/// - 视频帧在 GPU 完成回调里转到 `writerQueue` 追加，保证 presentation time 单调。
+/// - `capture` / `appendAudio` 在 ARSession delegate 队列调用，顶点流在该队列同步写入。
+/// - 视频帧在 GPU 完成回调里、音频在收到后都转到 `writerQueue` 追加，每个 input 只从一个线程喂数据。
 /// - `finish` 在 delegate 队列调用，等所有在途视频帧落盘后再收尾。
+///
+/// 时间轴：mesh 帧、视频帧、音频样本都用 `ARFrame.timestamp` 的时钟减去第一帧的时间；
+/// ARKit 的音频样本和相机帧来自同一个 capture session，直接相减即可。
 final class FaceRecorder {
     static let maxDuration: TimeInterval = 15
     private static let logger = Logger(subsystem: "com.frank.faceplant", category: "recorder")
@@ -23,6 +26,8 @@ final class FaceRecorder {
     private let assetWriter: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let adaptor: AVAssetWriterInputPixelBufferAdaptor
+    /// 不录音时为 nil
+    private let audioInput: AVAssetWriterInput?
 
     private let writerQueue = DispatchQueue(label: "com.frank.faceplant.recorder.writer")
     private let pendingAppends = DispatchGroup()
@@ -33,8 +38,9 @@ final class FaceRecorder {
     private var isAccepting = true
     private var droppedVideoFrames = 0
 
-    /// 只在 writerQueue 访问
+    // 以下只在 writerQueue 访问
     private var lastPixelBuffer: CVPixelBuffer?
+    private var appendedAudioSamples = 0
 
     /// 已录制时长，秒
     var elapsed: TimeInterval {
@@ -42,7 +48,9 @@ final class FaceRecorder {
         return lastTimestamp - startTimestamp
     }
 
-    init(packageURL: URL, topology: FaceMeshTopology, textureSize: Int, textureCache: PixelBufferTextureCache) throws {
+    init(
+        packageURL: URL, topology: FaceMeshTopology, textureSize: Int, textureCache: PixelBufferTextureCache, includesAudio: Bool
+    ) throws {
         self.packageURL = packageURL
         self.topology = topology
         self.textureSize = textureSize
@@ -79,10 +87,29 @@ final class FaceRecorder {
             throw FaceplantError.recordingSetupFailed("AVAssetWriter 不接受视频输入")
         }
         assetWriter.add(videoInput)
+
+        audioInput = includesAudio ? try Self.addAudioInput(to: assetWriter) : nil
         guard assetWriter.startWriting() else {
             throw FaceplantError.recordingSetupFailed(assetWriter.error?.localizedDescription ?? "startWriting 失败")
         }
         assetWriter.startSession(atSourceTime: .zero)
+    }
+
+    /// AAC 单声道 64 kbps；输入是 ARKit 给的 PCM，采样率不同由 writer 转换
+    private static func addAudioInput(to writer: AVAssetWriter) throws -> AVAssetWriterInput {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64000,
+        ]
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+        input.expectsMediaDataInRealTime = true
+        guard writer.canAdd(input) else {
+            throw FaceplantError.recordingSetupFailed("AVAssetWriter 不接受音频输入")
+        }
+        writer.add(input)
+        return input
     }
 
     /// 在烘焙 pass 的 beforeCommit 钩子里调用：写顶点帧，并把烘焙结果 blit 进视频像素缓冲。
@@ -135,6 +162,33 @@ final class FaceRecorder {
         }
     }
 
+    /// 把一段麦克风样本写进音轨，时间戳换成相对录制起点。第一帧视频之前到的声音丢掉，保证两条轨同一个零点。
+    func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard isAccepting, let audioInput, let start = startTimestamp else { return }
+        let presentation = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let offset = CMTime(seconds: start, preferredTimescale: presentation.timescale)
+        let relative = CMTimeSubtract(presentation, offset)
+        guard relative >= .zero else { return }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMSampleBufferGetDuration(sampleBuffer), presentationTimeStamp: relative, decodeTimeStamp: .invalid
+        )
+        var retimed: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault, sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleBufferOut: &retimed
+        )
+        guard status == noErr, let retimed else {
+            Self.logger.warning("音频重定时失败 \(status)")
+            return
+        }
+        writerQueue.async { [self] in
+            if audioInput.isReadyForMoreMediaData, audioInput.append(retimed) {
+                appendedAudioSamples += 1
+            }
+        }
+    }
+
     /// 停止接收，等在途帧落盘，写缩略图与 manifest。completion 在任意队列回调。
     func finish(completion: @escaping (Result<FaceRecording, Error>) -> Void) {
         isAccepting = false
@@ -150,7 +204,9 @@ final class FaceRecorder {
 
         pendingAppends.notify(queue: writerQueue) { [self] in
             let thumbnailSource = lastPixelBuffer
+            let hasAudio = appendedAudioSamples > 0
             videoInput.markAsFinished()
+            audioInput?.markAsFinished()
             assetWriter.finishWriting { [self] in
                 if let error = assetWriter.error {
                     completion(.failure(error))
@@ -171,7 +227,8 @@ final class FaceRecorder {
                         meshFrameCount: meshFrameCount,
                         textureSize: textureSize,
                         hasBlendShapes: true,
-                        deviceModel: Self.deviceModel()
+                        deviceModel: Self.deviceModel(),
+                        hasAudio: hasAudio
                     )
                     try manifest.write(to: packageURL.appendingPathComponent(FaceRecording.manifestFileName))
                     Self.logger.info("录制完成 \(meshFrameCount) 帧，丢弃视频帧 \(dropped)")

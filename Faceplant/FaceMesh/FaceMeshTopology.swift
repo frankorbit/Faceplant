@@ -28,15 +28,16 @@ struct FaceMeshTopology: Equatable {
 
     // MARK: - 序列化
 
-    // 文件布局（小端）：
+    // 布局（小端）：
     //   magic 'FPTP' UInt32 · version UInt32 · vertexCount UInt32 · indexCount UInt32
     //   uv Float32 × 2 × vertexCount
     //   indices Int16 × indexCount
+    // 录制包里是 topology.bin，附近通话时同一份字节直接发给对方。
     private static let magic: UInt32 = 0x5054_5046
     private static let version: UInt32 = 1
     private static let headerSize = 16
 
-    func write(to url: URL) throws {
+    func serialized() -> Data {
         var data = Data()
         data.appendValue(Self.magic)
         data.appendValue(Self.version)
@@ -44,25 +45,28 @@ struct FaceMeshTopology: Equatable {
         data.appendValue(UInt32(indexCount))
         data.appendArray(textureCoordinates.flatMap { [$0.x, $0.y] })
         data.appendArray(triangleIndices)
-        try data.write(to: url, options: .atomic)
+        return data
     }
 
-    init(contentsOf url: URL) throws {
-        let data = try Data(contentsOf: url)
+    func write(to url: URL) throws {
+        try serialized().write(to: url, options: .atomic)
+    }
+
+    init(serialized data: Data) throws {
         guard data.count >= Self.headerSize else {
-            throw FaceplantError.recordingPackageInvalid("topology.bin 太短")
+            throw FaceplantError.recordingPackageInvalid("拓扑数据太短")
         }
         let magic: UInt32 = data.loadValue(at: 0)
         let version: UInt32 = data.loadValue(at: 4)
         guard magic == Self.magic, version == Self.version else {
-            throw FaceplantError.recordingPackageInvalid("topology.bin 魔数或版本不匹配")
+            throw FaceplantError.recordingPackageInvalid("拓扑魔数或版本不匹配")
         }
         let vertexCount = Int(data.loadValue(at: 8) as UInt32)
         let indexCount = Int(data.loadValue(at: 12) as UInt32)
         let uvBytes = vertexCount * 2 * MemoryLayout<Float>.size
         let indexBytes = indexCount * MemoryLayout<Int16>.size
         guard data.count == Self.headerSize + uvBytes + indexBytes else {
-            throw FaceplantError.recordingPackageInvalid("topology.bin 长度与头部不符")
+            throw FaceplantError.recordingPackageInvalid("拓扑长度与头部不符")
         }
         let uvs: [Float] = data.loadArray(at: Self.headerSize, count: vertexCount * 2)
         let indices: [Int16] = data.loadArray(at: Self.headerSize + uvBytes, count: indexCount)
@@ -71,5 +75,9 @@ struct FaceMeshTopology: Equatable {
             textureCoordinates: stride(from: 0, to: uvs.count, by: 2).map { SIMD2<Float>(uvs[$0], uvs[$0 + 1]) },
             triangleIndices: indices
         )
+    }
+
+    init(contentsOf url: URL) throws {
+        try self.init(serialized: Data(contentsOf: url))
     }
 }

@@ -23,6 +23,11 @@ targets:
       properties:
         CFBundleDisplayName: Faceplant
         NSCameraUsageDescription: Faceplant 需要前置摄像头录制你的脸，并用后置摄像头把它放到墙上。
+        NSMicrophoneUsageDescription: Faceplant 录脸时同时录下你的声音，附近通话时把声音传给对方。
+        NSLocalNetworkUsageDescription: Faceplant 通过本地网络和附近的设备建立 3D 人脸通话。
+        NSBonjourServices:
+          - _faceplant-call._tcp
+          - _faceplant-call._udp
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
