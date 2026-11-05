@@ -106,4 +106,28 @@ typedef struct {
     float gridSpacing;
 } PlaneGridUniforms;
 
+// MARK: - 空闲墙面 pass
+
+typedef enum : int {
+    IdleWallBufferIndexVertices = 0,
+    IdleWallBufferIndexUniforms = 1
+} IdleWallBufferIndex;
+
+typedef enum : int {
+    IdleWallTextureIndexWall = 0
+} IdleWallTextureIndex;
+
+/// 静态场景里还没有脸可画时整面墙的绘制参数。
+/// 贴图映射 uv = xy * wallScale + wallOffset 与 FaceUniforms 完全一致，脸出现后墙纹不会错位；
+/// glow 是脸将要出现的位置上一圈柔和的加法光晕，椭圆距离 |(xy - glowCenter) / glowRadius| 到 1 处衰减为零。
+typedef struct {
+    matrix_float4x4 projectionViewModel;
+    vector_float2 wallScale;
+    vector_float2 wallOffset;
+    vector_float2 glowCenter;
+    vector_float2 glowRadius;
+    vector_float3 glowColor;
+    float glowStrength;
+} IdleWallUniforms;
+
 #endif /* ShaderTypes_h */

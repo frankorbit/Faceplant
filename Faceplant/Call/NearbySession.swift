@@ -65,17 +65,20 @@ final class NearbySession: NSObject {
         notify(.idle)
     }
 
-    /// 没连上时静默丢弃；发送失败只记日志，链路断开会从 session 回调过来
-    func send(_ message: CallMessage, mode: MCSessionSendDataMode) {
-        guard let peer = connectedPeer.withLock({ $0 }) else { return }
+    /// 没连上时静默丢弃并返回 false；发送失败只记日志，链路断开会从 session 回调过来
+    @discardableResult
+    func send(_ message: CallMessage, mode: MCSessionSendDataMode) -> Bool {
+        guard let peer = connectedPeer.withLock({ $0 }) else { return false }
         do {
             try session.send(message.encoded(), toPeers: [peer], with: mode)
+            return true
         } catch {
             sendFailures += 1
             let failures = sendFailures
             if failures % 30 == 1 {
                 Self.logger.warning("发送失败 \(failures) 次: \(error.localizedDescription)")
             }
+            return false
         }
     }
 

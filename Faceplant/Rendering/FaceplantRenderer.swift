@@ -6,7 +6,8 @@ import simd
 
 /// 脸的 Metal 渲染器，几个 pass 共用一个 encoder：
 /// 背景 pass 画相机画面或静态墙面，平面网格 pass 提示可放置的平面（`PlaneGridRenderer`），
-/// 墙面补丁 pass 把脸周围的墙纹向外推开，脸 pass 把脸连同鼓包挤出墙面。
+/// 墙面补丁 pass 把脸周围的墙纹向外推开，脸 pass 把脸连同鼓包挤出墙面；
+/// 静态场景里还没有脸时由空闲墙面 pass（`IdleWallRenderer`）画整面墙和等待光晕。
 ///
 /// 两种场景：
 /// - `.ar`：放置页，相机帧直接读 `session.currentFrame`，脸挂在用户放置的 ARAnchor 上。
@@ -43,6 +44,7 @@ final class FaceplantRenderer: NSObject {
     private let backgroundDepthState: MTLDepthStencilState
     private let sceneDepthState: MTLDepthStencilState
     private let planeGrid: PlaneGridRenderer
+    private let idleWall: IdleWallRenderer
     private let inflight = DispatchSemaphore(value: FaceplantRenderer.inflightCount)
     private var frameIndex = 0
 
@@ -130,6 +132,9 @@ final class FaceplantRenderer: NSObject {
             colorPixelFormat: colorPixelFormat, depthPixelFormat: depthPixelFormat
         )
         planeGrid = try PlaneGridRenderer(
+            device: device, library: library, colorPixelFormat: colorPixelFormat, depthPixelFormat: depthPixelFormat
+        )
+        idleWall = try IdleWallRenderer(
             device: device, library: library, colorPixelFormat: colorPixelFormat, depthPixelFormat: depthPixelFormat
         )
 
@@ -339,10 +344,16 @@ extension FaceplantRenderer: MTKViewDelegate {
         if !input.isRGB {
             encodeBackground(encoder: encoder, input: input)
         }
-        planeGrid.draw(
-            encoder: encoder, planes: input.planes, projectionView: input.projection * input.view, slot: frameIndex % Self.inflightCount
-        )
-        encodeScene(encoder: encoder, input: input, viewport: viewport)
+        let projectionView = input.projection * input.view
+        planeGrid.draw(encoder: encoder, planes: input.planes, projectionView: projectionView, slot: frameIndex % Self.inflightCount)
+        let drewFace = encodeScene(encoder: encoder, input: input, viewport: viewport)
+        // 静态场景里还没有脸（通话页等对方、录制页还没识别到人脸）时不能只剩清屏的黑，画整面墙加等待光晕
+        if !drewFace, input.isRGB {
+            idleWall.draw(
+                encoder: encoder, wall: input.luma, projectionView: projectionView,
+                wallTileSize: parameters.wallTileSize, time: CACurrentMediaTime()
+            )
+        }
         encoder.endEncoding()
 
         // 闭包持有相机纹理，保证 IOSurface 在 GPU 读取完成前不被回收
@@ -373,15 +384,16 @@ extension FaceplantRenderer: MTKViewDelegate {
         encoder.popDebugGroup()
     }
 
-    /// 墙面补丁 + 脸（含鼓包），两者共用 uniform 与相机纹理
-    private func encodeScene(encoder: MTLRenderCommandEncoder, input: CameraInput, viewport: CGSize) {
-        guard let source, let anchorTransform = input.anchorTransform, let faceTexture = source.faceTexture else { return }
+    /// 墙面补丁 + 脸（含鼓包），两者共用 uniform 与相机纹理。
+    /// - Returns: 是否真的画了；没有 source、贴图或顶点时什么都不画并返回 false
+    private func encodeScene(encoder: MTLRenderCommandEncoder, input: CameraInput, viewport: CGSize) -> Bool {
+        guard let source, let anchorTransform = input.anchorTransform, let faceTexture = source.faceTexture else { return false }
 
         // 本帧没有新数据就沿用上一帧的顶点
         if let frameData = source.currentFrame(at: CACurrentMediaTime()), frameData.vertices.count == source.topology.vertexCount {
             lastVertices = frameData.vertices
         }
-        guard let vertices = lastVertices, let mesh = ensureMesh(topology: source.topology, firstVertices: vertices) else { return }
+        guard let vertices = lastVertices, let mesh = ensureMesh(topology: source.topology, firstVertices: vertices) else { return false }
 
         // 鼓包底部随 depthScale/sinkDepth 变，所以每帧重算
         let depthOffset = Self.depthOffset(rimMinZ: mesh.rimMinZ, parameters: parameters)
@@ -414,6 +426,7 @@ extension FaceplantRenderer: MTKViewDelegate {
 
         drawWallPatch(encoder: encoder, mesh: mesh)
         drawFace(encoder: encoder, mesh: mesh, slot: slot, faceTexture: faceTexture)
+        return true
     }
 
     private func drawWallPatch(encoder: MTLRenderCommandEncoder, mesh: MeshResources) {

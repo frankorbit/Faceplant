@@ -1,6 +1,7 @@
 //
 //  Shaders.metal
-//  烘焙（capturedImage 展开到 canonical UV）、背景（相机画面全屏）、平面网格（放置提示）、脸（挤出 + 折射）。
+//  烘焙（capturedImage 展开到 canonical UV）、背景（相机画面全屏）、平面网格（放置提示）、
+//  空闲墙面（还没有脸时的静态墙 + 等待光晕）、脸（挤出 + 折射）。
 //
 
 #include <metal_stdlib>
@@ -242,4 +243,33 @@ fragment float4 planeGridFragment(PlaneGridVertexOut in [[stage_in]],
     // 格子内部留一点底色，让整块平面的范围也看得出来
     float alpha = u.lineColor.a * (0.12f + 0.88f * line);
     return float4(u.lineColor.rgb, alpha);
+}
+
+// MARK: - 空闲墙面 pass：静态场景里还没有脸时整面墙 + 等待光晕
+
+struct IdleWallVertexOut {
+    float4 position [[position]];
+    float2 localXY;
+};
+
+vertex IdleWallVertexOut idleWallVertex(uint vid [[vertex_id]],
+                                        const device float3 *vertices [[buffer(IdleWallBufferIndexVertices)]],
+                                        constant IdleWallUniforms &u [[buffer(IdleWallBufferIndexUniforms)]])
+{
+    float3 v = vertices[vid];
+    IdleWallVertexOut out;
+    out.position = u.projectionViewModel * float4(v, 1.0f);
+    out.localXY = v.xy;
+    return out;
+}
+
+fragment float4 idleWallFragment(IdleWallVertexOut in [[stage_in]],
+                                 constant IdleWallUniforms &u [[buffer(IdleWallBufferIndexUniforms)]],
+                                 texture2d<float> wall [[texture(IdleWallTextureIndexWall)]])
+{
+    float3 color = wall.sample(wallRepeat, in.localXY * u.wallScale + u.wallOffset).rgb;
+    // 光晕用加法叠上去而不是压暗四周：脸到了之后整面墙按原亮度画，周边不会突然变亮
+    float d = length((in.localXY - u.glowCenter) / u.glowRadius);
+    float glow = (1.0f - smoothstep(0.0f, 1.0f, d)) * u.glowStrength;
+    return float4(color + u.glowColor * glow, 1.0f);
 }

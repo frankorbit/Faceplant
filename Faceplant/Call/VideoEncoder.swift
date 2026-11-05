@@ -55,13 +55,15 @@ final class VideoEncoder {
         invalidate()
     }
 
-    func encode(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
+    /// - Parameter forceKeyframe: 新对端刚连上时用，不用等下一个周期关键帧就能开始解
+    func encode(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval, forceKeyframe: Bool = false) {
         queue.async { [weak self] in
             guard let self, let session else { return }
             let presentation = CMTime(seconds: timestamp, preferredTimescale: 1_000_000)
+            let properties: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
             let status = VTCompressionSessionEncodeFrame(
                 session, imageBuffer: pixelBuffer, presentationTimeStamp: presentation, duration: .invalid,
-                frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil
+                frameProperties: properties, sourceFrameRefcon: nil, infoFlagsOut: nil
             )
             if status != noErr {
                 Self.logger.warning("编码失败 \(status)")

@@ -1,6 +1,5 @@
 import ARKit
 import Metal
-import MetalKit
 import UIKit
 
 /// 放置页：后置摄像头世界追踪，已检测的平面画成网格，点击把录好的脸种上去，脸从墙里凸出并折射周围墙纹；
@@ -9,28 +8,21 @@ import UIKit
 /// 职责划分：
 /// - 生命周期与 UI：本类
 /// - 会话：ARSessionController（世界追踪）
-/// - 绘制：FaceplantRenderer（MTKView 主线程回调）
+/// - 显示、放置与摆放手势：ARFacePlacementView
 /// - 数据：FaceRecordingPlayer 作为 FaceMeshSource
-/// - 摆放手势：FacePlacementGestureController，结果是 anchor 之上的 FaceAdjustment
 /// - 留言落盘：FaceMessageCapture
 final class PlaceViewController: UIViewController {
     private let recording: FaceRecording
     private let sessionController = ARSessionController()
-    private let metalView = MTKView()
+    private let placementView = ARFacePlacementView()
     private let statusLabel = UILabel()
     private let hintLabel = UILabel()
     private let panel = ParameterPanel()
     private let panelButton = UIButton(type: .system)
     private let saveButton = UIButton(type: .system)
-    private let gestures = FacePlacementGestureController()
 
-    private var renderer: FaceplantRenderer?
     private var player: FaceRecordingPlayer?
-    private var faceAnchor: ARAnchor?
     private var isSaving = false
-    // 以下两个只在 delegate 队列读写，用来节流提示的刷新
-    private var lastTrackingDescription = ""
-    private var lastHasPlane = false
 
     init(recording: FaceRecording) {
         self.recording = recording
@@ -45,10 +37,9 @@ final class PlaceViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        setupMetalView()
+        setupPlacementView()
         setupControls()
         setupRendering()
-        setupGestures()
         bindSession()
     }
 
@@ -61,34 +52,32 @@ final class PlaceViewController: UIViewController {
             show(status: "\(error)")
         }
         player?.play()
-        metalView.isPaused = false
+        placementView.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        metalView.isPaused = true
+        placementView.isPaused = true
         player?.pause()
         sessionController.pause()
     }
 
     // MARK: - Setup
 
-    private func setupMetalView() {
-        metalView.translatesAutoresizingMaskIntoConstraints = false
-        metalView.colorPixelFormat = .bgra8Unorm
-        metalView.depthStencilPixelFormat = .depth32Float
-        metalView.clearDepth = 1
-        metalView.preferredFramesPerSecond = 60
-        metalView.framebufferOnly = true
-        metalView.backgroundColor = .black
-        view.addSubview(metalView)
+    private func setupPlacementView() {
+        placementView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(placementView)
         NSLayoutConstraint.activate([
-            metalView.topAnchor.constraint(equalTo: view.topAnchor),
-            metalView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            metalView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            metalView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            placementView.topAnchor.constraint(equalTo: view.topAnchor),
+            placementView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            placementView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            placementView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        metalView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
+        // 名字进世界地图，重访留言时按它找回
+        placementView.anchorName = FaceMessage.anchorName
+        placementView.onHint = { [weak self] hint in self?.hintLabel.text = hint }
+        placementView.onStatus = { [weak self] status in self?.show(status: status) }
+        placementView.onPlace = { [weak self] _ in self?.saveButton.isHidden = false }
     }
 
     private func setupControls() {
@@ -100,7 +89,7 @@ final class PlaceViewController: UIViewController {
         view.addSubview(statusLabel)
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.text = "慢慢移动手机，扫描墙面或桌面"
+        hintLabel.text = placementView.hints.scanning
         hintLabel.font = .systemFont(ofSize: 15, weight: .medium)
         hintLabel.textColor = .white
         hintLabel.textAlignment = .center
@@ -123,7 +112,7 @@ final class PlaceViewController: UIViewController {
 
         panel.translatesAutoresizingMaskIntoConstraints = false
         panel.isHidden = true
-        panel.onChange = { [weak self] parameters in self?.renderer?.parameters = parameters }
+        panel.onChange = { [weak self] parameters in self?.placementView.parameters = parameters }
         view.addSubview(panel)
 
         NSLayoutConstraint.activate([
@@ -147,7 +136,8 @@ final class PlaceViewController: UIViewController {
         ])
     }
 
-    private static func overlayButtonConfiguration(title: String) -> UIButton.Configuration {
+    /// 半透明黑底白字的悬浮按钮样式，通话页也用
+    static func overlayButtonConfiguration(title: String) -> UIButton.Configuration {
         var config = UIButton.Configuration.filled()
         config.title = title
         config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.5)
@@ -161,117 +151,34 @@ final class PlaceViewController: UIViewController {
             show(status: FaceplantError.metalUnavailable.description)
             return
         }
-        metalView.device = device
         do {
             let player = try FaceRecordingPlayer(recording: recording, device: device)
-            let renderer = try FaceplantRenderer(
-                device: device,
-                scene: .ar(sessionController.session),
-                colorPixelFormat: metalView.colorPixelFormat,
-                depthPixelFormat: metalView.depthStencilPixelFormat
-            )
-            renderer.source = player
-            // 脸放下之前把检测到的平面画出来，用户知道往哪点
-            renderer.showsPlaneGrid = true
-            renderer.onDraw = { [weak player] hostTime in player?.pollTexture(hostTime: hostTime) }
-            metalView.delegate = renderer
+            try placementView.configure(device: device, sessionController: sessionController)
+            placementView.source = player
+            placementView.onDraw = { [weak player] hostTime in player?.pollTexture(hostTime: hostTime) }
             self.player = player
-            self.renderer = renderer
         } catch {
             show(status: "渲染初始化失败: \(error)")
         }
     }
 
-    private func setupGestures() {
-        gestures.attach(to: metalView)
-        gestures.contextProvider = { [weak self] in
-            guard let self, let frame = sessionController.session.currentFrame, let transform = currentAnchorTransform(in: frame) else {
-                return nil
-            }
-            return FacePlacementGestureController.Context(camera: frame.camera, anchorTransform: transform)
-        }
-        gestures.onChange = { [weak self] adjustment in
-            self?.renderer?.faceAdjustment = adjustment.transform
-        }
-    }
-
     private func bindSession() {
         sessionController.onFrame = { [weak self] frame in
-            self?.handle(frame: frame)
+            self?.placementView.handle(frame: frame)
         }
         sessionController.onFailure = { [weak self] error in
             self?.show(status: "session failed: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - 放置
-
-    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
-        guard let renderer, let frame = sessionController.session.currentFrame else { return }
-        let point = gesture.location(in: metalView)
-        let imagePoint = FacePlacement.imagePoint(fromViewPoint: point, viewSize: metalView.bounds.size, frame: frame)
-        // 先用 estimatedPlane 保证点了就有反应；命中已检测的平面时结果里会带 ARPlaneAnchor，优先用它
-        let query = frame.raycastQuery(from: imagePoint, allowing: .estimatedPlane, alignment: .any)
-        let results = sessionController.session.raycast(query)
-        guard let hit = results.first(where: { $0.anchor is ARPlaneAnchor }) ?? results.first else {
-            show(status: "没找到表面，对着有纹理的墙再试")
-            return
-        }
-
-        let transform = FacePlacement.faceTransform(hit: hit, cameraTransform: frame.camera.transform)
-        if let faceAnchor {
-            sessionController.session.remove(anchor: faceAnchor)
-        }
-        // 名字进世界地图，重访留言时按它找回
-        let anchor = ARAnchor(name: FaceMessage.anchorName, transform: transform)
-        sessionController.session.add(anchor: anchor)
-        faceAnchor = anchor
-        gestures.resetPose()
-        renderer.faceAnchorIdentifier = anchor.identifier
-        renderer.showsPlaneGrid = false
-        saveButton.isHidden = false
-        hintLabel.text = "拖动移位，双指旋转、缩放；再点一下换位置"
-        show(status: hit.anchor is ARPlaneAnchor ? "放在已检测的平面上" : "放在估计平面上，继续移动手机会更准")
-    }
-
-    /// anchor 的变换会随追踪修正，取帧里的最新值；主线程
-    private func currentAnchorTransform(in frame: ARFrame) -> simd_float4x4? {
-        guard let faceAnchor else { return nil }
-        return frame.anchors.first { $0.identifier == faceAnchor.identifier }?.transform ?? faceAnchor.transform
-    }
-
     @objc private func togglePanel() {
         panel.isHidden.toggle()
     }
 
-    // MARK: - 状态（delegate 队列）
-
-    private func handle(frame: ARFrame) {
-        let description = ARTrackingStatus.description(for: frame.camera.trackingState)
-        if description != lastTrackingDescription {
-            lastTrackingDescription = description
-            show(status: description)
-        }
-        let hasPlane = frame.anchors.contains { $0 is ARPlaneAnchor }
-        guard hasPlane != lastHasPlane else { return }
-        lastHasPlane = hasPlane
-        DispatchQueue.main.async { [weak self] in
-            // 脸已经放下就不再改提示
-            guard let self, faceAnchor == nil else { return }
-            hintLabel.text = hasPlane ? "检测到平面，点击网格放置你的脸" : "慢慢移动手机，扫描墙面或桌面"
-        }
-    }
-
+    /// 主线程
     private func show(status: String) {
-        if Thread.isMainThread {
-            statusLabel.text = status
-            statusLabel.isHidden = status.isEmpty
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.statusLabel.text = status
-                self?.statusLabel.isHidden = status.isEmpty
-            }
-        }
+        statusLabel.text = status
+        statusLabel.isHidden = status.isEmpty
     }
 }
 
@@ -291,7 +198,7 @@ extension PlaceViewController {
     }
 
     private func saveMessage(title: String) {
-        guard let frame = sessionController.session.currentFrame, let transform = currentAnchorTransform(in: frame) else {
+        guard let frame = sessionController.session.currentFrame, let transform = placementView.currentAnchorTransform(in: frame) else {
             show(status: "先点墙面放好脸再留言")
             return
         }
@@ -302,7 +209,7 @@ extension PlaceViewController {
         saveButton.isEnabled = false
         hintLabel.text = "正在保存留言…"
         let request = FaceMessageCapture.Request(
-            frame: frame, faceTransform: transform, faceAdjustment: gestures.adjustment, recording: recording, title: title
+            frame: frame, faceTransform: transform, faceAdjustment: placementView.adjustment, recording: recording, title: title
         )
         FaceMessageCapture.save(request, session: sessionController.session) { [weak self] result in
             guard let self else { return }
@@ -312,7 +219,7 @@ extension PlaceViewController {
             case .success:
                 hintLabel.text = "已保存，首页「留言」里可以重访"
             case let .failure(error):
-                hintLabel.text = "拖动移位，双指旋转、缩放；再点一下换位置"
+                hintLabel.text = placementView.hints.placed
                 show(status: "\(error)")
             }
         }
