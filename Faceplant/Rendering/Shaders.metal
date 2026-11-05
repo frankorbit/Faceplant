@@ -1,6 +1,6 @@
 //
 //  Shaders.metal
-//  三个 pass：烘焙（capturedImage 展开到 canonical UV）、背景（相机画面全屏）、脸（挤出 + 折射）。
+//  烘焙（capturedImage 展开到 canonical UV）、背景（相机画面全屏）、平面网格（放置提示）、脸（挤出 + 折射）。
 //
 
 #include <metal_stdlib>
@@ -212,4 +212,34 @@ fragment float4 wallFragment(WallVertexOut in [[stage_in]],
         discard_fragment();
     }
     return float4(sampleWall(restPosition(in.localXY, d, u), float2(0.0f), u, luma, chroma), 1.0f);
+}
+
+// MARK: - 平面网格 pass：已检测的平面上铺一层半透明网格，提示哪里能放脸
+
+struct PlaneGridVertexOut {
+    float4 position [[position]];
+    float2 planeXZ;
+};
+
+vertex PlaneGridVertexOut planeGridVertex(uint vid [[vertex_id]],
+                                          const device float3 *vertices [[buffer(PlaneGridBufferIndexVertices)]],
+                                          constant PlaneGridUniforms &u [[buffer(PlaneGridBufferIndexUniforms)]])
+{
+    float3 v = vertices[vid];
+    PlaneGridVertexOut out;
+    out.position = u.projectionViewModel * float4(v, 1.0f);
+    out.planeXZ = v.xz;
+    return out;
+}
+
+fragment float4 planeGridFragment(PlaneGridVertexOut in [[stage_in]],
+                                  constant PlaneGridUniforms &u [[buffer(PlaneGridBufferIndexUniforms)]])
+{
+    // 到最近网格线的距离按屏幕像素算，线宽恒定不随远近变粗变细
+    float2 cell = in.planeXZ / u.gridSpacing;
+    float2 dist = abs(fract(cell - 0.5f) - 0.5f) / max(fwidth(cell), float2(1e-5f));
+    float line = 1.0f - min(min(dist.x, dist.y), 1.0f);
+    // 格子内部留一点底色，让整块平面的范围也看得出来
+    float alpha = u.lineColor.a * (0.12f + 0.88f * line);
+    return float4(u.lineColor.rgb, alpha);
 }

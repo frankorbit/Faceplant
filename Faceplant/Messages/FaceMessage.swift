@@ -10,8 +10,10 @@ struct FaceMessageManifest: Codable, Hashable {
     var formatVersion: Int
     var createdAt: Date
     var title: String
-    /// 脸在保存时世界坐标下的变换（列主序 16 个数），和 worldmap.bin 同一坐标系
+    /// 脸所在 anchor 保存时的世界变换（列主序 16 个数），和 worldmap.bin 同一坐标系；用户手势调整不在里面
     var faceTransform: [Float]
+    /// 叠在 anchor 之后的局部调整（平移、旋转、缩放，见 `FaceAdjustment`）；旧包没有这个字段按单位矩阵读
+    var faceAdjustment: [Float]?
     /// 脸相对参考图 anchor 的变换；没做出参考图时为 nil
     var faceRelativeToImage: [Float]?
     /// 参考图的物理宽度（米），按放置点离相机的距离估出来的
@@ -75,6 +77,7 @@ struct FaceMessage: Identifiable, Hashable {
 
     var faceTransform: simd_float4x4? { simd_float4x4(flattened: manifest.faceTransform) }
     var faceRelativeToImage: simd_float4x4? { manifest.faceRelativeToImage.flatMap { simd_float4x4(flattened: $0) } }
+    var faceAdjustment: simd_float4x4 { manifest.faceAdjustment.flatMap { simd_float4x4(flattened: $0) } ?? matrix_identity_float4x4 }
 
     static func load(url: URL) throws -> FaceMessage {
         let manifestURL = url.appendingPathComponent(manifestFileName)

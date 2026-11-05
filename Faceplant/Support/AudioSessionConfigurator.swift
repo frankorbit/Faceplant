@@ -15,11 +15,11 @@ enum AudioSessionConfigurator {
         let session = AVAudioSession.sharedInstance()
         switch role {
         case .recording:
-            try session.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetoothHFP])
         case .playback:
             try session.setCategory(.playback, mode: .moviePlayback, options: [])
         case .call:
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
         }
         try session.setActive(true, options: [])
     }

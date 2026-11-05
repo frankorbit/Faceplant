@@ -4,8 +4,9 @@ import MetalKit
 import os
 import simd
 
-/// 脸的 Metal 渲染器，三个 pass 共用一个 encoder：
-/// 背景 pass 画相机画面或静态墙面，墙面补丁 pass 把脸周围的墙纹向外推开，脸 pass 把脸连同鼓包挤出墙面。
+/// 脸的 Metal 渲染器，几个 pass 共用一个 encoder：
+/// 背景 pass 画相机画面或静态墙面，平面网格 pass 提示可放置的平面（`PlaneGridRenderer`），
+/// 墙面补丁 pass 把脸周围的墙纹向外推开，脸 pass 把脸连同鼓包挤出墙面。
 ///
 /// 两种场景：
 /// - `.ar`：放置页，相机帧直接读 `session.currentFrame`，脸挂在用户放置的 ARAnchor 上。
@@ -41,6 +42,7 @@ final class FaceplantRenderer: NSObject {
     private let facePipeline: MTLRenderPipelineState
     private let backgroundDepthState: MTLDepthStencilState
     private let sceneDepthState: MTLDepthStencilState
+    private let planeGrid: PlaneGridRenderer
     private let inflight = DispatchSemaphore(value: FaceplantRenderer.inflightCount)
     private var frameIndex = 0
 
@@ -74,6 +76,8 @@ final class FaceplantRenderer: NSObject {
         let projection: simd_float4x4
         let view: simd_float4x4
         let anchorTransform: simd_float4x4?
+        /// 要画网格的平面，`showsPlaneGrid` 关着时为空
+        let planes: [ARPlaneAnchor]
         /// 持有相机纹理的 IOSurface 到 GPU 读完
         let retained: Any?
     }
@@ -94,6 +98,10 @@ final class FaceplantRenderer: NSObject {
 
     /// AR 场景里脸所在的 ARAnchor，由放置逻辑维护；为 nil 只画背景
     var faceAnchorIdentifier: UUID?
+    /// 叠在 anchor 之后的局部调整（平移、旋转、缩放），见 `FaceAdjustment`；静态场景也生效
+    var faceAdjustment = matrix_identity_float4x4
+    /// AR 场景里把已检测的平面画成网格，放好脸后关掉
+    var showsPlaneGrid = false
     var parameters = FaceRenderParameters.standard
     /// 每次绘制开始时调用，回放器用它拉新视频帧
     var onDraw: ((CFTimeInterval) -> Void)?
@@ -121,6 +129,9 @@ final class FaceplantRenderer: NSObject {
             spec: PipelineSpec(label: "Face", vertex: "faceVertex", fragment: "faceFragment"),
             colorPixelFormat: colorPixelFormat, depthPixelFormat: depthPixelFormat
         )
+        planeGrid = try PlaneGridRenderer(
+            device: device, library: library, colorPixelFormat: colorPixelFormat, depthPixelFormat: depthPixelFormat
+        )
 
         let backgroundDepth = MTLDepthStencilDescriptor()
         backgroundDepth.depthCompareFunction = .always
@@ -138,15 +149,16 @@ final class FaceplantRenderer: NSObject {
         super.init()
     }
 
-    private struct PipelineSpec {
+    struct PipelineSpec {
         let label: String
         let vertex: String
         let fragment: String
     }
 
-    private static func makePipeline(
+    /// - Parameter blending: 开启标准 alpha 混合，半透明的提示层用
+    static func makePipeline(
         device: MTLDevice, library: MTLLibrary, spec: PipelineSpec,
-        colorPixelFormat: MTLPixelFormat, depthPixelFormat: MTLPixelFormat
+        colorPixelFormat: MTLPixelFormat, depthPixelFormat: MTLPixelFormat, blending: Bool = false
     ) throws -> MTLRenderPipelineState {
         guard let vertexFunction = library.makeFunction(name: spec.vertex) else {
             throw FaceplantError.shaderFunctionMissing(spec.vertex)
@@ -160,6 +172,13 @@ final class FaceplantRenderer: NSObject {
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
         descriptor.depthAttachmentPixelFormat = depthPixelFormat
+        if blending {
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        }
         do {
             return try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
@@ -275,6 +294,7 @@ final class FaceplantRenderer: NSObject {
                 projection: frame.camera.projectionMatrix(for: .portrait, viewportSize: viewport, zNear: 0.01, zFar: 100),
                 view: frame.camera.viewMatrix(for: .portrait),
                 anchorTransform: anchor?.transform,
+                planes: showsPlaneGrid ? frame.anchors.compactMap { $0 as? ARPlaneAnchor } : [],
                 retained: planes
             )
         case let .still(background, camera):
@@ -286,6 +306,7 @@ final class FaceplantRenderer: NSObject {
                 projection: Self.perspective(fovY: .pi / 4, aspect: Float(viewport.width / max(viewport.height, 1)), near: 0.01, far: 10),
                 view: camera.viewMatrix,
                 anchorTransform: matrix_identity_float4x4,
+                planes: [],
                 retained: nil
             )
         }
@@ -318,6 +339,9 @@ extension FaceplantRenderer: MTKViewDelegate {
         if !input.isRGB {
             encodeBackground(encoder: encoder, input: input)
         }
+        planeGrid.draw(
+            encoder: encoder, planes: input.planes, projectionView: input.projection * input.view, slot: frameIndex % Self.inflightCount
+        )
         encodeScene(encoder: encoder, input: input, viewport: viewport)
         encoder.endEncoding()
 
@@ -433,7 +457,7 @@ extension FaceplantRenderer: MTKViewDelegate {
     private func makeFaceUniforms(
         input: CameraInput, anchorTransform: simd_float4x4, viewport: CGSize, mesh: MeshResources, depthOffset: Float
     ) -> FaceUniforms {
-        let viewModel = input.view * anchorTransform
+        let viewModel = input.view * anchorTransform * faceAdjustment
         return FaceUniforms(
             projectionViewModel: input.projection * viewModel,
             viewModel: viewModel,

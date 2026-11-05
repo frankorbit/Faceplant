@@ -12,8 +12,10 @@ enum FaceMessageCapture {
     struct Request {
         /// 保存那一刻的帧，裁参考图和估物理尺寸都用它
         let frame: ARFrame
-        /// 脸的世界变换，和地图同一坐标系
+        /// 脸所在 anchor 的世界变换，和地图同一坐标系
         let faceTransform: simd_float4x4
+        /// 用户手势对脸的局部调整，重访时原样叠回 anchor 上
+        let faceAdjustment: FaceAdjustment
         let recording: FaceRecording
         let title: String
     }
@@ -46,6 +48,7 @@ enum FaceMessageCapture {
             createdAt: Date(),
             title: request.title,
             faceTransform: request.faceTransform.flattened,
+            faceAdjustment: request.faceAdjustment.transform.flattened,
             faceRelativeToImage: reference.map { (simd_inverse($0.output.imageTransform) * request.faceTransform).flattened },
             referenceImageWidth: reference?.output.physicalWidth,
             referenceImageUsable: reference?.usable ?? false,
@@ -84,7 +87,10 @@ enum FaceMessageCapture {
     private static func makeReference(_ request: Request) -> Reference? {
         let output: ReferenceImageMaker.Output
         do {
-            output = try ReferenceImageMaker.make(frame: request.frame, faceTransform: request.faceTransform)
+            // 参考图以脸实际出现的位置为中心裁，平移、旋转要算进去；缩放不影响位置朝向，不带
+            output = try ReferenceImageMaker.make(
+                frame: request.frame, faceTransform: request.faceTransform * request.faceAdjustment.rigidTransform
+            )
         } catch {
             logger.warning("参考图生成失败: \(String(describing: error))")
             return nil

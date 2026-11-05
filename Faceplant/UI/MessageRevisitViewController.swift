@@ -151,6 +151,8 @@ final class MessageRevisitViewController: UIViewController {
                 depthPixelFormat: metalView.depthStencilPixelFormat
             )
             renderer.source = player
+            // 放置时用手势调过的位置、角度、大小，叠回找回来的 anchor 上
+            renderer.faceAdjustment = message.faceAdjustment
             renderer.onDraw = { [weak player] hostTime in player?.pollTexture(hostTime: hostTime) }
             metalView.delegate = renderer
             self.player = player

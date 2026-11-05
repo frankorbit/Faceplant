@@ -3,14 +3,15 @@ import Metal
 import MetalKit
 import UIKit
 
-/// 放置页：后置摄像头世界追踪，点击墙面把录好的脸种上去，脸从墙里凸出并折射周围墙纹；
-/// 放好后可以把这个位置连同世界地图存成一条留言。
+/// 放置页：后置摄像头世界追踪，已检测的平面画成网格，点击把录好的脸种上去，脸从墙里凸出并折射周围墙纹；
+/// 放好后可以拖动、旋转、缩放微调，再把这个位置连同世界地图存成一条留言。
 ///
 /// 职责划分：
 /// - 生命周期与 UI：本类
 /// - 会话：ARSessionController（世界追踪）
 /// - 绘制：FaceplantRenderer（MTKView 主线程回调）
 /// - 数据：FaceRecordingPlayer 作为 FaceMeshSource
+/// - 摆放手势：FacePlacementGestureController，结果是 anchor 之上的 FaceAdjustment
 /// - 留言落盘：FaceMessageCapture
 final class PlaceViewController: UIViewController {
     private let recording: FaceRecording
@@ -21,13 +22,15 @@ final class PlaceViewController: UIViewController {
     private let panel = ParameterPanel()
     private let panelButton = UIButton(type: .system)
     private let saveButton = UIButton(type: .system)
+    private let gestures = FacePlacementGestureController()
 
     private var renderer: FaceplantRenderer?
     private var player: FaceRecordingPlayer?
     private var faceAnchor: ARAnchor?
     private var isSaving = false
-    /// delegate 队列读写，用来节流追踪状态的刷新
+    // 以下两个只在 delegate 队列读写，用来节流提示的刷新
     private var lastTrackingDescription = ""
+    private var lastHasPlane = false
 
     init(recording: FaceRecording) {
         self.recording = recording
@@ -45,6 +48,7 @@ final class PlaceViewController: UIViewController {
         setupMetalView()
         setupControls()
         setupRendering()
+        setupGestures()
         bindSession()
     }
 
@@ -96,10 +100,11 @@ final class PlaceViewController: UIViewController {
         view.addSubview(statusLabel)
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.text = "点击墙面放置你的脸"
+        hintLabel.text = "慢慢移动手机，扫描墙面或桌面"
         hintLabel.font = .systemFont(ofSize: 15, weight: .medium)
         hintLabel.textColor = .white
         hintLabel.textAlignment = .center
+        hintLabel.numberOfLines = 0
         hintLabel.backgroundColor = UIColor.black.withAlphaComponent(0.5)
         hintLabel.layer.cornerRadius = 8
         hintLabel.clipsToBounds = true
@@ -134,7 +139,8 @@ final class PlaceViewController: UIViewController {
             panel.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: 0.6),
             hintLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             hintLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-            hintLabel.heightAnchor.constraint(equalToConstant: 36),
+            hintLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
+            hintLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
             hintLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
             saveButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             saveButton.bottomAnchor.constraint(equalTo: hintLabel.topAnchor, constant: -12),
@@ -165,6 +171,8 @@ final class PlaceViewController: UIViewController {
                 depthPixelFormat: metalView.depthStencilPixelFormat
             )
             renderer.source = player
+            // 脸放下之前把检测到的平面画出来，用户知道往哪点
+            renderer.showsPlaneGrid = true
             renderer.onDraw = { [weak player] hostTime in player?.pollTexture(hostTime: hostTime) }
             metalView.delegate = renderer
             self.player = player
@@ -174,9 +182,22 @@ final class PlaceViewController: UIViewController {
         }
     }
 
+    private func setupGestures() {
+        gestures.attach(to: metalView)
+        gestures.contextProvider = { [weak self] in
+            guard let self, let frame = sessionController.session.currentFrame, let transform = currentAnchorTransform(in: frame) else {
+                return nil
+            }
+            return FacePlacementGestureController.Context(camera: frame.camera, anchorTransform: transform)
+        }
+        gestures.onChange = { [weak self] adjustment in
+            self?.renderer?.faceAdjustment = adjustment.transform
+        }
+    }
+
     private func bindSession() {
         sessionController.onFrame = { [weak self] frame in
-            self?.updateTrackingStatus(frame.camera.trackingState)
+            self?.handle(frame: frame)
         }
         sessionController.onFailure = { [weak self] error in
             self?.show(status: "session failed: \(error.localizedDescription)")
@@ -205,18 +226,58 @@ final class PlaceViewController: UIViewController {
         let anchor = ARAnchor(name: FaceMessage.anchorName, transform: transform)
         sessionController.session.add(anchor: anchor)
         faceAnchor = anchor
+        gestures.resetPose()
         renderer.faceAnchorIdentifier = anchor.identifier
+        renderer.showsPlaneGrid = false
         saveButton.isHidden = false
-        hintLabel.text = "再点一下可以换位置"
+        hintLabel.text = "拖动移位，双指旋转、缩放；再点一下换位置"
         show(status: hit.anchor is ARPlaneAnchor ? "放在已检测的平面上" : "放在估计平面上，继续移动手机会更准")
+    }
+
+    /// anchor 的变换会随追踪修正，取帧里的最新值；主线程
+    private func currentAnchorTransform(in frame: ARFrame) -> simd_float4x4? {
+        guard let faceAnchor else { return nil }
+        return frame.anchors.first { $0.identifier == faceAnchor.identifier }?.transform ?? faceAnchor.transform
     }
 
     @objc private func togglePanel() {
         panel.isHidden.toggle()
     }
 
-    // MARK: - 留言
+    // MARK: - 状态（delegate 队列）
 
+    private func handle(frame: ARFrame) {
+        let description = ARTrackingStatus.description(for: frame.camera.trackingState)
+        if description != lastTrackingDescription {
+            lastTrackingDescription = description
+            show(status: description)
+        }
+        let hasPlane = frame.anchors.contains { $0 is ARPlaneAnchor }
+        guard hasPlane != lastHasPlane else { return }
+        lastHasPlane = hasPlane
+        DispatchQueue.main.async { [weak self] in
+            // 脸已经放下就不再改提示
+            guard let self, faceAnchor == nil else { return }
+            hintLabel.text = hasPlane ? "检测到平面，点击网格放置你的脸" : "慢慢移动手机，扫描墙面或桌面"
+        }
+    }
+
+    private func show(status: String) {
+        if Thread.isMainThread {
+            statusLabel.text = status
+            statusLabel.isHidden = status.isEmpty
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.statusLabel.text = status
+                self?.statusLabel.isHidden = status.isEmpty
+            }
+        }
+    }
+}
+
+// MARK: - 留言
+
+extension PlaceViewController {
     @objc private func saveMessageTapped() {
         guard !isSaving else { return }
         let alert = UIAlertController(title: "留言在这里", message: "给这条留言起个名字（可不填）", preferredStyle: .alert)
@@ -230,19 +291,19 @@ final class PlaceViewController: UIViewController {
     }
 
     private func saveMessage(title: String) {
-        guard let faceAnchor, let frame = sessionController.session.currentFrame else {
+        guard let frame = sessionController.session.currentFrame, let transform = currentAnchorTransform(in: frame) else {
             show(status: "先点墙面放好脸再留言")
             return
         }
         if frame.worldMappingStatus == .notAvailable || frame.worldMappingStatus == .limited {
             show(status: "周围地图还没建好，保存后重访可能对不上；环视一圈再保存更稳")
         }
-        // anchor 的变换会随追踪修正，取帧里的最新值
-        let transform = frame.anchors.first { $0.identifier == faceAnchor.identifier }?.transform ?? faceAnchor.transform
         isSaving = true
         saveButton.isEnabled = false
         hintLabel.text = "正在保存留言…"
-        let request = FaceMessageCapture.Request(frame: frame, faceTransform: transform, recording: recording, title: title)
+        let request = FaceMessageCapture.Request(
+            frame: frame, faceTransform: transform, faceAdjustment: gestures.adjustment, recording: recording, title: title
+        )
         FaceMessageCapture.save(request, session: sessionController.session) { [weak self] result in
             guard let self else { return }
             isSaving = false
@@ -251,30 +312,8 @@ final class PlaceViewController: UIViewController {
             case .success:
                 hintLabel.text = "已保存，首页「留言」里可以重访"
             case let .failure(error):
-                hintLabel.text = "再点一下可以换位置"
+                hintLabel.text = "拖动移位，双指旋转、缩放；再点一下换位置"
                 show(status: "\(error)")
-            }
-        }
-    }
-
-    // MARK: - 状态
-
-    /// delegate 队列
-    private func updateTrackingStatus(_ state: ARCamera.TrackingState) {
-        let description = ARTrackingStatus.description(for: state)
-        guard description != lastTrackingDescription else { return }
-        lastTrackingDescription = description
-        show(status: description)
-    }
-
-    private func show(status: String) {
-        if Thread.isMainThread {
-            statusLabel.text = status
-            statusLabel.isHidden = status.isEmpty
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.statusLabel.text = status
-                self?.statusLabel.isHidden = status.isEmpty
             }
         }
     }

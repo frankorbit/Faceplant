@@ -92,4 +92,18 @@ typedef struct {
     int cameraIsRGB;
 } FaceUniforms;
 
+// MARK: - 平面网格 pass
+
+typedef enum : int {
+    PlaneGridBufferIndexVertices = 0,
+    PlaneGridBufferIndexUniforms = 1
+} PlaneGridBufferIndex;
+
+/// 已检测平面的网格提示。顶点在 ARPlaneAnchor 局部坐标（y 是法线），片元按局部 xz 每 gridSpacing 米画一条线。
+typedef struct {
+    matrix_float4x4 projectionViewModel;
+    vector_float4 lineColor;
+    float gridSpacing;
+} PlaneGridUniforms;
+
 #endif /* ShaderTypes_h */
